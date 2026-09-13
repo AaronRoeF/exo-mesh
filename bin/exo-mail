@@ -582,6 +582,92 @@ def cmd_intro(a):
                        res.get("hint", ""))
     return out_ok(res["data"], res["summary"], a.json)
 
+def _bedrock_slugs():
+    """Person-file slugs and normalized names carrying `bedrock: true`. Empty when the
+    people dir is unreadable -- an unknown is reported as unknown, never as false."""
+    import re as _re
+    d = CFG.people_dir()
+    slugs, names = set(), set()
+    if not d or not os.path.isdir(d):
+        return slugs, names, False
+    for fn_ in os.listdir(d):
+        if not fn_.endswith(".md"):
+            continue
+        try:
+            head = open(os.path.join(d, fn_), encoding="utf-8", errors="ignore").read(2000)
+        except OSError:
+            continue
+        if _re.search(r"^bedrock:\s*true\s*$", head, _re.M):
+            slugs.add(fn_[:-3].lower())
+            m = _re.search(r"^name:\s*(.+?)\s*$", head, _re.M)
+            nm_ = m.group(1) if m else fn_[:-3].replace("-", " ")
+            names.add(" ".join(sorted(_re.findall(r"[a-z0-9]+", nm_.lower()))))
+    names.discard("")
+    return slugs, names, True
+
+
+def cmd_prep(a):
+    """Total recall before a conversation: every channel, what you owe them, and a way in.
+
+    The union of what `contact show` and `reconnect` already compute, plus the two things
+    a pre-brief actually turns on -- whether this is a designated relationship, and
+    whether you have deliberately silenced a channel of theirs. Read-only."""
+    import time, re as _re
+    now = time.time()
+    mi = _mesh_identity(a.target, now)
+    if not mi:
+        return out_err("NOTFOUND", "no such person: %s" % a.target,
+                       "try an email address, or run exo-mesh-resolve")
+    emails = mi["emails"] or ([mi["email"]] if mi["email"] else [])
+    em = mi["email"] or (emails[0] if emails else a.target)
+    acct = _acct_for(emails)
+    me = CFG.email_for(acct)
+    addr_q = " or ".join("(from:%s and to:%s) or (from:%s and to:%s)" % (e, me, me, e)
+                         for e in (emails or [em]))
+    _, so, _ = nm("search", "--format=json", "--sort=newest-first", "--limit=3", addr_q)
+    try:
+        recent = [{"date": x.get("date_relative"), "subject": x.get("subject"),
+                   "thread": x.get("thread")} for x in json.loads(so or "[]")]
+    except ValueError:
+        recent = []
+    promises = _promises(acct, em)
+    slugs, bnames, readable = _bedrock_slugs()
+    pf = (mi["person_file"] or "").lower()
+    norm = " ".join(sorted(_re.findall(r"[a-z0-9]+", (mi["name"] or "").lower())))
+    bedrock = None if not readable else bool((pf and pf in slugs) or norm in bnames)
+    sup = _mesh_suppressed(("drift", "all"))
+    _ph = mi.get("phones") or []
+    if isinstance(_ph, str):
+        _ph = _ph.split()
+    owned = {e.lower() for e in emails} | {p for p in _ph if p}
+    suppressed = sorted(owned & sup)
+    angles = []
+    if promises:
+        angles.append('close the loop \u2014 you left "%s" open' % (promises[0][:80]))
+    if recent and recent[0].get("subject"):
+        angles.append('follow up on "%s"' % (recent[0]["subject"][:60]))
+    if mi["freshest"] and mi["freshest"] != "email":
+        angles.append("the relationship lives on %s, not email \u2014 reach out there" % mi["freshest"])
+    pack = {
+        "name": mi["name"], "email": em, "emails": emails, "person_file": mi["person_file"],
+        "where_you_stand": {
+            "last_contact_days": mi["last_contact_days"], "freshest": mi["freshest"],
+            "channels": mi["channels"], "initiates": mi["initiates"],
+            "email_last_days": mi["email_last_days"], "imsg_last_days": mi["imsg_last_days"],
+            "cal_last_days": mi["cal_last_days"], "total": mi["total"],
+            "sent": mi["sent"], "recv": mi["recv"]},
+        "open_promises": promises,
+        "recent_threads": recent,
+        "bedrock": bedrock,
+        "work_suppressed_keys": suppressed,
+        "angles": angles}
+    bits = ["last contact %s" % ("%dd" % mi["last_contact_days"] if mi["last_contact_days"] is not None else "never")]
+    if mi["freshest"]: bits.append("via %s" % mi["freshest"])
+    if promises: bits.append("%d open promise(s)" % len(promises))
+    if bedrock: bits.append("BEDROCK")
+    if suppressed: bits.append("%d suppressed key(s)" % len(suppressed))
+    return out_ok(pack, "prep %s: %s" % (mi["name"], " \u00b7 ".join(bits)), a.json)
+
 def cmd_storage(a):
     import subprocess as _sp
     def du(p): 
@@ -851,6 +937,7 @@ def main():
     g=sub.add_parser("tag",parents=[common], help="move a sender or thread into a box, and make it stick"); g.add_argument("id"); g.add_argument("ops",nargs=argparse.REMAINDER); g.set_defaults(fn=cmd_tag)
     br=sub.add_parser("brief",parents=[common], help="what needs you today, in one read"); br.add_argument("--drift-days",type=int,default=90); br.set_defaults(fn=cmd_brief)
     bd=sub.add_parser("bedrock",parents=[common], help="the relationships that outlived the job that made them"); bd.add_argument("action",nargs="?",choices=["candidates"],default="candidates"); bd.add_argument("--min-span",type=float,default=7.0,dest="min_span"); bd.add_argument("--alive-months",type=int,default=18,dest="alive_months"); bd.set_defaults(fn=cmd_bedrock)
+    pr=sub.add_parser("prep",parents=[common], help="total recall before a conversation: every channel, what you owe them, a way in"); pr.add_argument("target"); pr.set_defaults(fn=cmd_prep)
     iw=sub.add_parser("intro",parents=[common], help="who you already know who knows them"); iw.add_argument("target"); iw.add_argument("--min-edges",type=int,default=1); iw.set_defaults(fn=cmd_intro)
     st=sub.add_parser("storage",parents=[common], help="where the disk went, per store"); st.set_defaults(fn=cmd_storage)
     mc=sub.add_parser("mcp",parents=[common], help="hand the whole thing to an agent over MCP (stdio)"); mc.set_defaults(fn=cmd_mcp)

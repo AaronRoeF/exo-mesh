@@ -17,7 +17,32 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import exomail_config as CFG
 
 DB = CFG.store_path("calendar.db")
-SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
+RO = "https://www.googleapis.com/auth/calendar.readonly"
+RW = "https://www.googleapis.com/auth/calendar.events"
+
+
+def scope_for(acct):
+    """Read-only everywhere by default; write only where a write is actually needed.
+
+    Context entries are placed on ONE dedicated calendar in the personal account, so
+    only that account is granted `calendar.events`. The work account stays read-only:
+    an account that never needs to write should never hold a token that can. Note this
+    is `calendar.events`, not `calendar` -- it cannot create or delete calendars.
+
+    Raising a scope requires re-consent. An existing read-only refresh token does not
+    silently gain write, which is the property that makes this safe to change.
+    EXO_CAL_SCOPE overrides for a reader who wants read-only everywhere.
+    """
+    override = os.environ.get("EXO_CAL_SCOPE")
+    if override:
+        return override
+    # BOTH, for the account that writes. `calendar.events` alone cannot enumerate
+    # calendars -- users/me/calendarList returns 403 -- and enumeration is how the
+    # pull finds anything to read. Granting events WITHOUT readonly silently breaks
+    # reading, which is exactly what happened here on 2026-09-13: a re-consent to
+    # events-only replaced the readonly grant and the personal pull started failing
+    # with "Insufficient Permission" while the sync logged it and carried on.
+    return (RO + " " + RW) if acct == "personal" else RO
 # One OAuth client per account: the first account reuses the default client file,
 # the rest get a per-account one. Same convention as the mail pull.
 def _client_file(a):
@@ -54,7 +79,7 @@ def auth(acct):
     redirect = "http://127.0.0.1:%d/" % port
     url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(
         {"client_id": c["client_id"], "redirect_uri": redirect, "response_type": "code",
-         "scope": SCOPE, "access_type": "offline", "prompt": "consent", "login_hint": EMAIL[acct]})
+         "scope": scope_for(acct), "access_type": "offline", "prompt": "consent", "login_hint": EMAIL[acct]})
     box = {}
     class H(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
@@ -95,7 +120,15 @@ def pull_google(acct):
     tmax = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=WINDOW_FUTURE_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
     c = db(); total = 0
     try:
-        cals = gapi(tok, "users/me/calendarList")["items"]
+        try:
+            cals = gapi(tok, "users/me/calendarList")["items"]
+        except Exception as e:
+            # A scope that can write but not enumerate reads as a generic API error.
+            # Name it, because the fix is a re-consent and nothing else looks like this.
+            print("[%s] cannot list calendars: %s\n"
+                  "     If this says Insufficient Permission, the token's scope is too "
+                  "narrow to READ.\n     Re-consent: exo-cal auth %s" % (acct, e, acct))
+            return 2
     except urllib.error.HTTPError as e:
         print("[%s] Calendar API HTTP %d: %s" % (acct, e.code, e.read().decode()[:200])); return 2
     for cal in cals:
