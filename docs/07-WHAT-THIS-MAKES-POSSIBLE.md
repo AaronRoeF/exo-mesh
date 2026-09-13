@@ -5,7 +5,7 @@ texts and contacts resolve to a single record on your own disk, a class of thing
 becomes cheap that was previously impossible — not because the idea was hard, but
 because the data was in four places owned by three companies.
 
-Five of these work today. Two do not exist yet and are marked as such, because a
+Six of these work today. One does not exist yet and are marked as such, because a
 roadmap dressed as a feature list is how you lose a reader twice.
 
 ---
@@ -83,20 +83,31 @@ The consequence is that "prep me for this meeting" and "who should I reconnect w
 stop being prompts you engineer and start being queries the agent can actually answer.
 
 ## 6. Who do I know who knows them
-**Not built yet.** The data is already on disk.
+**Today.** `exo-mail intro` — built 2026-09-12.
 
-Every thread with more than one recipient is evidence that two people know each other.
-Across a real archive that is a substantial graph, and it is sitting unused in the
-replica right now — a sampled read of ordinary inbox threads finds roughly a quarter
-carry two or more recipients, and repeated pairs are a genuine edge rather than noise.
+Two kinds of evidence, both already on disk. Every calendar event two people both
+attended is a strong edge — they were in a room, on purpose, at the same time. Every
+message they were both named on is a weaker one, because a long Cc list is not a
+relationship. On a real archive the calendar source alone yields tens of thousands of
+distinct pairs, most of them seen more than once.
 
 What that buys you: *"I want to reach someone at Acme Robotics — who do I already know
 who has been on a thread with them, how recently, and how strong is my side of that
 relationship?"* A warm path, ranked, computed from your own correspondence, with nobody
 else's social graph involved and nothing uploaded to find it.
 
+The ranking multiplies edge strength by **your** side of it: a connector you have never
+replied to is not a warm path however many meetings they share with the target. Every row
+carries the raw counts that produced its score, so you can overrule the arithmetic instead
+of trusting it — and if you already share an upcoming meeting with a connector, it says so,
+because then you do not need an introduction at all.
+
 Every professional network product sells you a version of this built on a graph you do
 not own and cannot inspect. The honest version is derivable from your own mailbox.
+
+```bash
+exo-mail intro "acme.example"
+```
 
 ## 7. Context that arrives instead of being fetched
 **Not built yet.** Designed; see the roadmap note below.

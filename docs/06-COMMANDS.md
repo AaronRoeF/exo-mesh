@@ -90,6 +90,24 @@ A context pack for someone you have drifted from: what you last discussed, what 
 you would do, and which channel is actually alive for them. With `-m` it leaves a real
 draft for you to review.
 
+### You need to reach someone and have no relationship with them — `exo-mail intro`
+Who do you already know who knows them. Two kinds of evidence, both already on your disk:
+every calendar event you both attended (strong — you were in a room together on purpose)
+and every message you were both named on (weaker — a long Cc list is not a relationship).
+Ranked by your own side of it, because a connector you have never replied to is not a
+warm path.
+
+```bash
+exo-mail intro "acme.example"        # a whole company
+exo-mail intro "Priya Shah"          # one person
+exo-mail intro "priya@example.com" --min-edges 3
+```
+
+Every row shows the counts that produced its score — meetings together, threads together,
+when you last spoke to the connector — so you can overrule the arithmetic. A connector you
+already share an upcoming meeting with is called out separately: you may not need an
+introduction at all.
+
 ### You want to know which relationships to protect when a job ends — `exo-mail bedrock`
 Seven-plus years of span, two-way in at least one channel, still alive in the last
 eighteen months. The tool computes those three; whether a relationship survived a change

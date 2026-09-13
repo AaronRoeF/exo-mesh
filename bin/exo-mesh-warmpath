@@ -1,0 +1,293 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+"""exo-mesh-warmpath — who do you already know who knows them.
+
+You want to reach someone at a company you have no relationship with. The usual answer
+is a professional network built on a graph you do not own and cannot inspect. The honest
+answer is already in your own replica: every meeting you both sat in, and every thread
+you were both named on, is evidence that two people know each other.
+
+TWO EDGE SOURCES, weighted differently because they are not equal evidence:
+
+  meeting   both attended the same calendar event. Strong -- they were in a room (or a
+            call) together, on purpose, at the same time.
+  thread    both appeared in the To/Cc of the same message. Weaker -- a large Cc list is
+            not a relationship.
+
+The ranking multiplies edge strength by YOUR side of it: a connector you have never
+replied to is not a warm path, no matter how many meetings they share with the target.
+Every row carries the raw counts that produced its score, so the human can overrule the
+arithmetic instead of trusting it.
+
+INVARIANTS
+  * read-only and offline. Reads calendar.db, mesh.db and the notmuch index. Writes
+    nothing, ever.
+  * never invents an edge. Every returned connector carries `meetings` and `threads`
+    counts that are literally observable in the stores.
+  * suppression is SHOWN, not applied. Someone whose work address you silenced may still
+    be the right person to ask; that is a human call, so the row is flagged rather than
+    dropped.
+  * a bedrock connector is flagged too -- a long relationship is a different kind of ask.
+  * you are never your own connector.
+
+Exit 0 with an empty list when nothing connects; that is an answer, not a failure.
+"""
+import os, sys, re, json, time, sqlite3, subprocess, itertools, collections, datetime
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+
+MESH = CFG.store_path("mesh.db")
+CAL  = CFG.store_path("calendar.db")
+NOTMUCH = CFG.notmuch_bin()
+SELF = {e.lower() for e in CFG.self_emails()}
+NOW = time.time()
+ADDR = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
+# A thread with a huge Cc is a broadcast, not an introduction. Above this, the edge is
+# noise and is skipped entirely rather than down-weighted.
+MAX_RECIPIENTS = 12
+MEETING_WEIGHT = 2.0      # sitting in the same meeting beats sharing a Cc line
+THREAD_WEIGHT  = 1.0
+
+
+def nm(*a):
+    r = subprocess.run([NOTMUCH, *a], capture_output=True, text=True)
+    return r.returncode, r.stdout, r.stderr
+
+
+def norm(s):
+    return " ".join(sorted(re.findall(r"[a-z0-9]+", (s or "").lower())))
+
+
+def identities():
+    if not os.path.exists(MESH):
+        return [], {}
+    con = sqlite3.connect("file:%s?mode=ro" % MESH, uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        rows = con.execute("SELECT * FROM identity").fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    con.close()
+    by_key = {}
+    for r in rows:
+        for e in (r["emails"] or "").split():
+            by_key[e.strip().lower()] = r
+    return rows, by_key
+
+
+def resolve_target(needle, rows, by_key):
+    """A target is an address, a name, or a bare domain. Returns (label, {addresses})."""
+    n = needle.strip().lower().lstrip("@")
+    if "@" in n and ADDR.fullmatch(n):
+        r = by_key.get(n)
+        return (r["name"] if r else n), {n}
+    if "." in n and " " not in n:                      # a domain
+        hits = {k for k in by_key if k.endswith("@" + n)}
+        return ("@" + n), hits
+    want = norm(n)
+    addrs, label = set(), needle
+    for r in rows:
+        rn = norm(r["name"])
+        if rn == want or (want and want in rn):
+            label = r["name"]
+            addrs |= {e.strip().lower() for e in (r["emails"] or "").split()}
+    return label, addrs
+
+
+def meeting_edges(target_addrs):
+    """Co-attendance from the local calendar replica. One pass, no per-person query."""
+    edges = collections.Counter()
+    recent, upcoming = {}, {}
+    if not os.path.exists(CAL):
+        return edges, recent, upcoming
+    con = sqlite3.connect("file:%s?mode=ro" % CAL, uri=True)
+    try:
+        cur = con.execute("SELECT attendees, start, title FROM events "
+                          "WHERE attendees IS NOT NULL AND attendees != ''")
+    except sqlite3.OperationalError:
+        con.close(); return edges, recent, upcoming
+    for att, start, title in cur:
+        addrs = {a.lower() for a in ADDR.findall(att or "")} - SELF
+        if not (addrs & target_addrs):
+            continue
+        if len(addrs) > MAX_RECIPIENTS:
+            continue
+        for c in addrs - target_addrs:
+            edges[c] += 1
+            if not start:
+                continue
+            # A recurring series' NEXT instance is in the future. Reporting it as "most
+            # recent together" is the P9 defect class (future cal_last inflating
+            # recency) -- so past and future are tracked separately. A shared meeting
+            # already on the calendar is its own useful signal, not a stale one.
+            if start <= NOW:
+                if start > recent.get(c, (0, ""))[0]:
+                    recent[c] = (start, (title or "")[:60])
+            else:
+                if c not in upcoming or start < upcoming[c][0]:
+                    upcoming[c] = (start, (title or "")[:60])
+    con.close()
+    return edges, recent, upcoming
+
+
+def thread_edges(target_addrs, limit=300):
+    """Co-recipients on the target's own threads. Targeted, so it stays cheap: only the
+    messages that name the target are read, not the whole corpus."""
+    edges = collections.Counter()
+    if not target_addrs:
+        return edges
+    q = " or ".join('to:"%s"' % a for a in sorted(target_addrs)[:20])
+    rc, so, _ = nm("search", "--format=json", "--output=files", "--limit=%d" % limit, "(%s)" % q)
+    if rc != 0:
+        return edges
+    try:
+        files = json.loads(so or "[]")
+    except ValueError:
+        return edges
+    for path in files:
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                head = fh.read(8192).split("\n\n", 1)[0]
+        except OSError:
+            continue
+        addrs = set()
+        for line in head.splitlines():
+            low = line.lower()
+            if low.startswith("to:") or low.startswith("cc:"):
+                addrs |= {a.lower() for a in ADDR.findall(line)}
+        addrs -= SELF
+        if not (addrs & target_addrs) or len(addrs) > MAX_RECIPIENTS:
+            continue
+        for c in addrs - target_addrs:
+            edges[c] += 1
+    return edges
+
+
+def suppressed_keys():
+    f = CFG.store_path("mesh-suppress.tsv")
+    out = set()
+    if not os.path.exists(f):
+        return out
+    for ln in open(f, encoding="utf-8"):
+        ln = ln.strip()
+        if ln and not ln.startswith("#"):
+            out.add(ln.split("\t")[0].strip().lower())
+    return out
+
+
+def bedrock_names():
+    d = CFG.people_dir()
+    names = set()
+    if not d or not os.path.isdir(d):
+        return names
+    for fn in os.listdir(d):
+        if not fn.endswith(".md"):
+            continue
+        try:
+            head = open(os.path.join(d, fn), encoding="utf-8", errors="ignore").read(2000)
+        except OSError:
+            continue
+        if re.search(r"^bedrock:\s*true\s*$", head, re.M):
+            m = re.search(r"^name:\s*(.+?)\s*$", head, re.M)
+            names.add(norm(m.group(1) if m else fn[:-3].replace("-", " ")))
+    names.discard("")
+    return names
+
+
+def main():
+    import argparse
+    ap = argparse.ArgumentParser(
+        description="who you already know who knows them (local, offline)")
+    ap.add_argument("target", help="a name, an email address, or a bare domain")
+    ap.add_argument("--limit", type=int, default=10)
+    ap.add_argument("--min-edges", type=int, default=1,
+                    help="drop connectors with fewer than N shared meetings+threads")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args()
+
+    rows, by_key = identities()
+    if not rows:
+        print(json.dumps({"ok": False, "code": "NOTFOUND", "error": "no mesh.db",
+                          "hint": "run exo-mesh-resolve", "retryable": False}))
+        return 2
+    label, target_addrs = resolve_target(a.target, rows, by_key)
+    if not target_addrs:
+        print(json.dumps({"ok": False, "code": "NOTFOUND",
+                          "error": "no address on record for %r" % a.target,
+                          "hint": "try an email address or a bare domain",
+                          "retryable": False}))
+        return 2
+
+    m_edges, m_recent, m_upcoming = meeting_edges(target_addrs)
+    t_edges = thread_edges(target_addrs)
+    sup = suppressed_keys()
+    bed = bedrock_names()
+    now = time.time()
+
+    seen, out = set(), []
+    for key in set(m_edges) | set(t_edges):
+        r = by_key.get(key)
+        if not r or r["id"] in seen:
+            continue
+        owned = {e.strip().lower() for e in (r["emails"] or "").split()}
+        if owned & set(a.target.lower().split()) or owned & target_addrs:
+            continue
+        meetings = sum(m_edges[k] for k in owned if k in m_edges)
+        threads = sum(t_edges[k] for k in owned if k in t_edges)
+        if meetings + threads < a.min_edges:
+            continue
+        seen.add(r["id"])
+        # your side of it: an unanswered contact is not a warm path
+        two_way = (r["email_sent"] or 0) > 0 and (r["email_recv"] or 0) > 0
+        imsg_two_way = (r["imsg_sent"] or 0) > 0 and (r["imsg_recv"] or 0) > 0
+        last_days = int((now - (r["last_contact"] or 0)) / 86400) if r["last_contact"] else None
+        strength = 1.0
+        if two_way or imsg_two_way: strength *= 2.0
+        if last_days is not None and last_days < 90: strength *= 1.5
+        elif last_days is not None and last_days > 730: strength *= 0.5
+        edge = MEETING_WEIGHT * meetings + THREAD_WEIGHT * threads
+        rec = m_recent.get(next((k for k in owned if k in m_recent), None))
+        up = m_upcoming.get(next((k for k in owned if k in m_upcoming), None))
+        out.append({
+            "name": r["name"], "email": sorted(owned)[0] if owned else None,
+            "score": round(edge * strength, 1),
+            "meetings_together": meetings, "threads_together": threads,
+            "your_last_contact_days": last_days,
+            "your_channel": r["channels"], "two_way": bool(two_way or imsg_two_way),
+            "bedrock": norm(r["name"]) in bed,
+            "work_suppressed": bool(owned & sup),
+            "last_met": (
+                {"when": datetime.date.fromtimestamp(rec[0]).isoformat(), "title": rec[1]}
+                if rec else None),
+            "next_meeting_together": (
+                {"when": datetime.date.fromtimestamp(up[0]).isoformat(), "title": up[1]}
+                if up else None),
+            "person_file": CFG.row_get(r, "person_file") or None})
+    out.sort(key=lambda x: (-x["score"], -(x["meetings_together"])))
+    out = out[:a.limit]
+
+    summary = ("warm path to %s: %d connector(s) from %d shared meeting(s) and %d thread(s)"
+               % (label, len(out), sum(m_edges.values()), sum(t_edges.values())))
+    if a.json or not sys.stdout.isatty():
+        print(json.dumps({"ok": True, "data": out, "summary": summary}))
+    else:
+        print(summary)
+        for c in out:
+            flags = "".join(["  ★bedrock" if c["bedrock"] else "",
+                             "  ⚠work-suppressed" if c["work_suppressed"] else "",
+                             "" if c["two_way"] else "  (one-way — weak ask)"])
+            last = "%sd" % c["your_last_contact_days"] if c["your_last_contact_days"] is not None else "?"
+            print("  %-24s score %-6s %2d meetings · %2d threads · you last spoke %s%s"
+                  % (c["name"][:24], c["score"], c["meetings_together"],
+                     c["threads_together"], last, flags))
+            if c["last_met"]:
+                print("      last together: %s — %s"
+                      % (c["last_met"]["when"], c["last_met"]["title"]))
+            if c["next_meeting_together"]:
+                print("      ALREADY SCHEDULED together: %s — %s"
+                      % (c["next_meeting_together"]["when"], c["next_meeting_together"]["title"]))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

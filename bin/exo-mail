@@ -562,6 +562,26 @@ def cmd_reconnect(a):
         pack["draft_id"]=d.get("id"); pack["subject"]=subj
         return out_ok(pack,"reconnect draft saved to %s (%s) \u2014 review + delete the context block in Gmail before sending"%(name,acct),a.json)
     return out_ok(pack,"reconnect pack: %s \u00b7 quiet %sd \u00b7 %d angles \u00b7 %d open promise(s)"%(name,qd,len(angles),len(promises)),a.json)
+def cmd_intro(a):
+    """Warm path: who you already know who knows the target. Delegates to
+    exo-mesh-warmpath so there is one implementation, not two that drift."""
+    import subprocess
+    tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), "exo-mesh-warmpath")
+    if not os.path.exists(tool):
+        return out_err("NOTFOUND", "exo-mesh-warmpath is not installed",
+                       "it ships alongside exo-mail in bin/")
+    r = subprocess.run([tool, a.target, "--limit", str(a.limit),
+                        "--min-edges", str(a.min_edges), "--json"],
+                       capture_output=True, text=True)
+    try:
+        res = json.loads(r.stdout or "{}")
+    except ValueError:
+        return out_err("API", "warmpath returned unparseable output", r.stderr[:120])
+    if not res.get("ok"):
+        return out_err(res.get("code", "API"), res.get("error", "warmpath failed"),
+                       res.get("hint", ""))
+    return out_ok(res["data"], res["summary"], a.json)
+
 def cmd_storage(a):
     import subprocess as _sp
     def du(p): 
@@ -831,6 +851,7 @@ def main():
     g=sub.add_parser("tag",parents=[common], help="move a sender or thread into a box, and make it stick"); g.add_argument("id"); g.add_argument("ops",nargs=argparse.REMAINDER); g.set_defaults(fn=cmd_tag)
     br=sub.add_parser("brief",parents=[common], help="what needs you today, in one read"); br.add_argument("--drift-days",type=int,default=90); br.set_defaults(fn=cmd_brief)
     bd=sub.add_parser("bedrock",parents=[common], help="the relationships that outlived the job that made them"); bd.add_argument("action",nargs="?",choices=["candidates"],default="candidates"); bd.add_argument("--min-span",type=float,default=7.0,dest="min_span"); bd.add_argument("--alive-months",type=int,default=18,dest="alive_months"); bd.set_defaults(fn=cmd_bedrock)
+    iw=sub.add_parser("intro",parents=[common], help="who you already know who knows them"); iw.add_argument("target"); iw.add_argument("--min-edges",type=int,default=1); iw.set_defaults(fn=cmd_intro)
     st=sub.add_parser("storage",parents=[common], help="where the disk went, per store"); st.set_defaults(fn=cmd_storage)
     mc=sub.add_parser("mcp",parents=[common], help="hand the whole thing to an agent over MCP (stdio)"); mc.set_defaults(fn=cmd_mcp)
     sk=sub.add_parser("skill",parents=[common], help="print the machine-readable capability surface"); sk.set_defaults(fn=cmd_skill)
