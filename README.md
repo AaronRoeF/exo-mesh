@@ -1,8 +1,8 @@
 # exo-mesh
 
-**Your agents want context about your life. This is the copy you own — mail,
-calendar, iMessage and contacts, joined on your own disk into one record per
-person.**
+**Walk into every conversation with the whole relationship in front of you — not
+the fragment one inbox remembers. Mail, calendar, iMessage and contacts, joined on
+your own disk into one record per person.**
 
 You've already lived the failure. You open with "it's been forever!" to someone you
 texted on Tuesday, because the email thread said six months and nothing thought to
@@ -23,9 +23,10 @@ Everything stays on your disk. No service, no daemon, no API key on the query pa
 Your relationship history is the most revealing corpus you own, and this is the copy
 that answers in single-digit milliseconds without renting it to anyone.
 
-This is the store an agent can actually read. `exo-mail mcp` speaks MCP, so what your
-agent knows about your life is a file on your disk under a retention policy you wrote
-yourself — and it runs against a six-figure message archive, not a demo fixture.
+And it is the store an agent can read. `exo-mail mcp` speaks MCP, so every agent,
+skill and draft you build reasons over the whole relationship instead of one inbox's
+fragment — from a file on your disk, under a retention policy you wrote yourself. It
+runs against a six-figure message archive, not a demo fixture.
 
 Four channels. One person. Zero egress.
 
