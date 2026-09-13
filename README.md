@@ -139,6 +139,19 @@ locally. A large mailbox costs real disk. Details and the rest of the list:
 
 ---
 
+## Where this sits
+
+exo-mesh is one subsystem of a larger local-first setup. Each of these stands alone; you
+do not need any of the others to use this.
+
+| | |
+|---|---|
+| **[exo](https://github.com/AaronRoeF/exo)** | The layer this plugs into — memory, skills, hooks and MCP servers that compound across sessions. exo-mesh is where its relationship context comes from. Start there if you want the whole environment rather than the mail and relationship half. |
+| **[claude-code-patterns](https://github.com/AaronRoeF/claude-code-patterns)** | The field-tested patterns this was built with — what worked, what did not, and why. Read it if you want to build something like this rather than run this. |
+| **[apply-what-you-read](https://github.com/AaronRoeF/apply-what-you-read)** | The same local-first shape applied to books instead of people: your highlights become one short lesson a day, on your own disk. |
+
+---
+
 ## Status and license
 
 Working software that one person runs every day, published because the pattern is
