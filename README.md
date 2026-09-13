@@ -53,28 +53,28 @@ each person. Formal email can be stone cold while you text every week.
 **One person, not four strangers.** A work address, a personal Gmail and a mobile
 number resolve to a single identity, so "who is this?" has one complete answer.
 
-**Honest drift.** `exo-mail contact drift --days 120` reports who has gone quiet
-across *every* channel — not the email-shaped shadow of it. No false alarm about
-someone you saw on Tuesday.
+**Get told who you're losing before they're gone.** `exo-mail contact drift
+--days 120` reports who has gone quiet across *every* channel — not the
+email-shaped shadow of it. No false alarm about someone you saw on Tuesday.
 
-**BEDROCK.** Relationships that outlived the context that created them: seven-plus
+**Know which relationships outlived the job that made them.** BEDROCK: seven-plus
 years of span, two-way in at least one channel, still alive in the last eighteen
 months. The tool computes those three; the fourth — *did it survive a context
 change?* — is a human call it records rather than guesses. See
 [docs/01-CONCEPTS.md](docs/01-CONCEPTS.md).
 
-**Search that works two ways.** `exo-mail search` for a notmuch query,
-`exo-mail semantic` for meaning (local embeddings via [Ollama](https://ollama.com/) —
-nothing is sent anywhere), and `exo-imsg-search` for an exact phrase you remember
-from a text three years ago.
+**Find it whether you remember the words or only the gist.** `exo-mail search`
+for a notmuch query, `exo-mail semantic` for meaning (local embeddings via
+[Ollama](https://ollama.com/) — nothing is sent anywhere), and `exo-imsg-search`
+for an exact phrase you remember from a text three years ago.
 
-**A day surface.** `exo-mesh` composes today's meetings, your task counts, the mail
-that needs a reply, and whether you've written a journal note yet — one read across
-the local stores.
+**Open one thing in the morning instead of five.** `exo-mesh` composes today's
+meetings, your task counts, the mail that needs a reply, and whether you've written a
+journal note yet — one read across the local stores.
 
 ---
 
-## The safety model, stated plainly
+## Why you can point this at your real mailbox
 
 **No tool in this repository sends mail, marks spam, or moves anything to trash.**
 Not the CLI, not the MCP server. There is no flag for it. The only outbound verb is
@@ -115,7 +115,7 @@ mail root are read from `notmuch config`, which you set up anyway.
 
 ---
 
-## Docs
+## Where to go next
 
 | | |
 |---|---|
@@ -128,7 +128,7 @@ mail root are read from `notmuch config`, which you set up anyway.
 
 ---
 
-## Limitations, up front
+## What will bite you, before you install it
 
 macOS only. Gmail only. Single writer — run the sync on exactly one machine.
 Reading iMessage requires granting Full Disk Access, and without it the database
