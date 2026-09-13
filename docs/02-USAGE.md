@@ -8,7 +8,7 @@ Global flags on every `exo-mail` subcommand: `--json`, `--account <name>|all`
 
 ---
 
-## Reading mail
+## Read your mail without opening a browser tab
 
 ```sh
 exo-mail search "from:jordan@example.com and date:6M.."   # any notmuch query
@@ -34,7 +34,7 @@ exo-imsg-search -n 30 invoice draft
 
 ---
 
-## People
+## Know where someone stands before you reply
 
 ```sh
 exo-mail contact list                        # top two-way relationships by volume
@@ -58,7 +58,7 @@ the fourth is yours.
 
 ---
 
-## Organising
+## Make the pile navigable once, instead of every morning
 
 ```sh
 exo-mail tag <message-id> +exo/reply-later -unread
@@ -79,7 +79,7 @@ every notmuch call, every API call and the rule-file write, and performs none of
 
 ---
 
-## Drafting
+## Draft with what you actually promised them in front of you
 
 ```sh
 exo-mail reply <thread-id> -m "Sounds good — Thursday works."
@@ -100,7 +100,7 @@ from your own sent mail of the last 200 days. It is a checklist, not prose.
 
 ---
 
-## The day
+## See the whole day in one read
 
 ```sh
 exo-mesh                 # the whole day, one local read
@@ -116,7 +116,7 @@ whether today's dated note exists under `EXO_MAIL_NOTES`. It only reads.
 
 ---
 
-## Calendar
+## Answer calendar questions with the network off
 
 ```sh
 exo-cal stats                     # what is in the replica
@@ -131,7 +131,7 @@ re-running is idempotent — the row count does not grow.
 
 ---
 
-## iMessage
+## Find the text you half-remember from three years ago
 
 ```sh
 exo-imsg snapshot          # WAL-consistent read-only copy + cursor + audit
@@ -146,7 +146,7 @@ Needs Full Disk Access. See [05-LIMITATIONS.md](05-LIMITATIONS.md).
 
 ---
 
-## Maintenance
+## Keep it fresh without thinking about it
 
 ```sh
 exo-mail doctor                   # the one to run when something is off
@@ -175,7 +175,7 @@ exo-mesh-bedrock-apply --apply    # writes person files
 
 ---
 
-## As an MCP server
+## Hand the whole thing to an agent
 
 ```sh
 exo-mail mcp      # stdio JSON-RPC

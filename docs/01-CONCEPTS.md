@@ -29,7 +29,7 @@ only those, to a backup directory.
 
 ---
 
-## The four channels
+## The four channels — why any one of them alone lies to you
 
 A relationship does not live in one place. It lives in whichever medium is
 convenient, which changes over the years, which is exactly what makes a single-inbox
@@ -45,7 +45,7 @@ exo-mail reads four:
 
 ---
 
-## Identity resolution
+## Identity resolution — why one person stops looking like four strangers
 
 The hard part is (4). Without it you have four strangers.
 
@@ -77,7 +77,7 @@ than failing.
 
 ---
 
-## Boxes
+## Boxes — why the pile stops being one undifferentiated pile
 
 Mail is bucketed into `exo/*` notmuch tags, which are pushed up as matching Gmail
 labels so both views agree:
@@ -102,7 +102,7 @@ The bucketing is idempotent and marked with `exo/classified`, so a re-run is fre
 
 ---
 
-## Drift
+## Drift — who you are losing, across every channel
 
 "Who have I gone quiet with?" — but honestly.
 
@@ -119,7 +119,7 @@ being suggested to you.
 
 ---
 
-## BEDROCK
+## BEDROCK — the relationships that outlived the job that made them
 
 Drift asks who is fading. BEDROCK asks the opposite and more interesting question:
 **which relationships outlived the context that created them?**
@@ -154,7 +154,7 @@ BEDROCK it is supporting evidence — the context ended and the relationship did
 
 ---
 
-## Person files (optional)
+## Person files — what you know that no mailbox does
 
 Point `EXO_MAIL_PEOPLE` at a directory of markdown files, one per person, named
 `first-last.md`, with the person's own addresses in the YAML frontmatter:
@@ -179,7 +179,7 @@ Unset the variable and all of this is simply skipped. Nothing requires it.
 
 ---
 
-## The output contract
+## The output contract — why you can script against every command
 
 Every `exo-mail` command prints a JSON envelope when piped or given `--json`:
 
