@@ -144,6 +144,7 @@ recorded human decision, not a gap — see `mesh-suppress.tsv`.
 | Doc | For |
 |---|---|
 | [docs/06-COMMANDS.md](docs/06-COMMANDS.md) | every command and the problem it solves |
+| [docs/07-WHAT-THIS-MAKES-POSSIBLE.md](docs/07-WHAT-THIS-MAKES-POSSIBLE.md) | what becomes buildable on this — read before proposing a feature |
 | [docs/01-CONCEPTS.md](docs/01-CONCEPTS.md) | what the mesh, boxes, drift and bedrock actually mean |
 | [docs/03-SAFETY.md](docs/03-SAFETY.md) | read before anything that writes |
 | [docs/04-CONFIG.md](docs/04-CONFIG.md) | how a setting resolves; nothing is hardcoded |

@@ -123,6 +123,7 @@ mail root are read from `notmuch config`, which you set up anyway.
 | [04-CONFIG.md](docs/04-CONFIG.md) | Every setting, how it resolves, worked example |
 | [05-LIMITATIONS.md](docs/05-LIMITATIONS.md) | Where this does not work, honestly |
 | [06-COMMANDS.md](docs/06-COMMANDS.md) | Every command and what it gets you — the reference. |
+| [07-WHAT-THIS-MAKES-POSSIBLE.md](docs/07-WHAT-THIS-MAKES-POSSIBLE.md) | Seven things a local relationship mesh makes possible — five that work, two that do not exist yet. |
 | [AGENTS.md](AGENTS.md) | Reading this as an agent? Start there — MCP tools, JSON contract, exit codes, what writes. |
 
 ---
