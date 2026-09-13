@@ -1,0 +1,317 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+"""exo-mesh-suppress-sweep — keep drift honest as people come and go.
+
+Drift nudges you about relationships that went QUIET. It must not nudge you about
+relationships that ENDED. Two rules find the ones that ended:
+
+  farewell    the person's last word was a goodbye. One notmuch query over a
+              phrase-anchored pattern set, then confirmed against mesh.db: the
+              farewell must be their last word, not an old thread they wrote past.
+  terminated  a person file already says they left -- `status: terminated` or
+              `type: former-*` in its frontmatter. A judgment you recorded, not a
+              heuristic's guess.
+
+WHY THERE IS NO ROSTER CROSS-CHECK. An earlier build took absence from a company
+roster file as evidence of departure. Its first dry run proposed suppressing two of
+the company's own founders: the roster was a months-stale employee export that never
+listed them. Absence from a list is not evidence. Positive evidence replaced it.
+
+INVARIANTS:
+  * additive + logged + reversible -- appends `key<TAB>scope<TAB>reason<TAB>date` to
+    mesh-suppress.tsv. Never deletes a relationship, a person file, or mesh data.
+    Delete the line and the relationship comes back.
+  * idempotent -- a key already on the list is skipped, so this can run every ten
+    minutes forever.
+  * a designated (bedrock) relationship is NEVER auto-suppressed. Matched by person
+    file OR name, because not every designated person carries a file link and a guard
+    with a hole is not a guard.
+  * scope is always `drift`, and only WORK addresses are suppressed. A free-mail
+    address is never touched: someone can leave a job without leaving your life.
+  * loud -- every applied suppression writes an observation note, so a later review
+    can see what the machine decided on its own and disagree with it.
+
+Dry run is the default: no flag, no write. Exit 0 always (a proposal is not a failure).
+"""
+import os, sys, re, json, time, subprocess, sqlite3, datetime
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+
+MESH     = CFG.store_path("mesh.db")
+SUPPRESS = CFG.store_path("mesh-suppress.tsv")
+NOTMUCH  = CFG.notmuch_bin()
+SELF     = {e.lower() for e in CFG.self_emails()}
+
+# Phrase-anchored, deliberately. The design doc's bare terms (farewell / last day /
+# goodbye / leaving) matched 72 threads in the corpus, topped by newsletters and
+# recruiting mail, and missed the real farewell it was written for. These match 4.
+FAREWELL = ["thank you and farewell", "farewell and thank", "my last day",
+            "last day at", "moving on from", "signing off", "new chapter",
+            "my final day", "leaving opaque", "departing opaque",
+            "so long and thanks"]
+# A farewell only counts if it is their LAST WORD: within this many days of the
+# person's last contact. Replying to a goodbye is normal; a year of traffic after
+# one means they did not leave.
+LAST_WORD_DAYS = 30
+# NOTE on newsletters: an earlier build filtered threads tagged exo/feed|updates|fins
+# as "broadcast". That was the wrong discriminator -- it rejected a real colleague's
+# goodbye that the classifier had filed under exo/feed, while adding nothing, because
+# a newsletter's sender is never a TWO-WAY mesh identity and is already excluded by
+# the join below. Deleted rather than tuned.
+# Free-mail domains are personal by definition and are never work-suppressed.
+PERSONAL_DOMAINS = {"gmail.com", "googlemail.com", "icloud.com", "me.com", "mac.com",
+                    "yahoo.com", "ymail.com", "hotmail.com", "outlook.com", "live.com",
+                    "aol.com", "msn.com", "proton.me", "protonmail.com", "comcast.net",
+                    "verizon.net", "sbcglobal.net", "pm.me"}
+DEPARTED_RE = re.compile(r"^(?:status:\s*terminated|type:\s*former-)", re.M | re.I)
+BEDROCK_RE  = re.compile(r"^bedrock:\s*true\s*$", re.M)
+
+
+def nm(*a):
+    r = subprocess.run([NOTMUCH, *a], capture_output=True, text=True)
+    return r.returncode, r.stdout, r.stderr
+
+
+def norm_name(s):
+    """Fold a name to a comparable key: lowercase alnum words, sorted. Survives
+    'Lastname, First Middle' vs 'First Middle Lastname' and slug-vs-display spelling."""
+    return " ".join(sorted(re.findall(r"[a-z0-9]+", (s or "").lower())))
+
+
+def is_work(email):
+    return "@" in email and email.rsplit("@", 1)[1].lower() not in PERSONAL_DOMAINS
+
+
+def suppressed_keys():
+    keys = set()
+    if not os.path.exists(SUPPRESS):
+        return keys
+    for ln in open(SUPPRESS, encoding="utf-8"):
+        ln = ln.strip()
+        if ln and not ln.startswith("#"):
+            keys.add(ln.split("\t")[0].strip().lower())
+    return keys
+
+
+def scan_people():
+    """One pass over the people files -> (bedrock keys, departed records).
+
+    Returns readable=False when the vault is not available, and the caller then
+    proposes NOTHING: without the people files BEDROCK cannot be excluded, and a
+    sweep that cannot see its own exclusion list must not write."""
+    d = CFG.people_dir()
+    bed_slugs, bed_names, departed = set(), set(), []
+    if not d or not os.path.isdir(d):
+        return bed_slugs, bed_names, departed, False
+    for fn in sorted(os.listdir(d)):
+        if not fn.endswith(".md"):
+            continue
+        slug = fn[:-3].lower()
+        try:
+            head = open(os.path.join(d, fn), encoding="utf-8", errors="ignore").read(2000)
+        except OSError:
+            continue
+        name = ""
+        m = re.search(r"^name:\s*(.+?)\s*$", head, re.M)
+        if m:
+            name = m.group(1)
+        if BEDROCK_RE.search(head):
+            bed_slugs.add(slug)
+            bed_names.add(norm_name(name or slug.replace("-", " ")))
+        if DEPARTED_RE.search(head):
+            emails = [e.lower() for e in
+                      re.findall(r"^(?:email|emails|work_email):\s*([\w.+-]+@[\w.-]+)",
+                                 head, re.M | re.I)]
+            departed.append({"slug": slug, "name": name or slug.replace("-", " "),
+                             "emails": emails})
+    bed_names.discard("")
+    return bed_slugs, bed_names, departed, True
+
+
+def identities():
+    if not os.path.exists(MESH):
+        return []
+    con = sqlite3.connect("file:%s?mode=ro" % MESH, uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        rows = con.execute(
+            "SELECT * FROM identity WHERE (email_sent>0 AND email_recv>0) "
+            "OR (imsg_sent>0 AND imsg_recv>0)").fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    con.close()
+    return rows
+
+
+def owned_emails(r):
+    return [e.strip().lower() for e in (r["emails"] or "").split() if e.strip()]
+
+
+def farewell_threads(limit=200):
+    """ONE notmuch query for the whole pattern set. Per-person queries would be
+    16k subprocesses every sync; this is one, and mesh.db does the joining."""
+    q = " or ".join('subject:"%s"' % p for p in FAREWELL)
+    rc, so, _ = nm("search", "--format=json", "--sort=newest-first",
+                   "--limit=%d" % limit, "(%s)" % q)
+    if rc != 0:
+        return []
+    try:
+        return json.loads(so or "[]")
+    except ValueError:
+        return []
+
+
+def thread_senders(tid):
+    """Real sender addresses for a thread. `notmuch search` reports `authors` as
+    display names, so the address subcommand is the only honest source."""
+    if not tid:
+        return []
+    rc, so, _ = nm("address", "--output=sender", "--format=json", "thread:%s" % tid)
+    if rc != 0:
+        return []
+    try:
+        return [(a.get("address") or "").lower() for a in json.loads(so or "[]")]
+    except ValueError:
+        return []
+
+
+def sweep(rules, apply_writes):
+    now = time.time()
+    today = datetime.date.today().isoformat()
+    rows = identities()
+    already = suppressed_keys()
+    bed_slugs, bed_names, departed, readable = scan_people()
+    props = []
+    skipped = {"already_suppressed": 0, "bedrock": 0, "personal_address": 0,
+               "not_last_word": 0}
+
+    def is_bedrock(r):
+        pf = (CFG.row_get(r, "person_file") or "").lower()
+        return (pf and pf in bed_slugs) or norm_name(r["name"]) in bed_names
+
+    def propose(r, key, rule, reason):
+        if key in already:
+            skipped["already_suppressed"] += 1
+            return
+        if not is_work(key):
+            skipped["personal_address"] += 1
+            return
+        if is_bedrock(r):
+            skipped["bedrock"] += 1
+            return
+        already.add(key)          # idempotent within one run too
+        last = r["email_last"] or 0
+        props.append({"rule": rule, "key": key, "scope": "drift",
+                      "name": r["name"] or key, "reason": reason,
+                      "quiet_days": int((now - last) / 86400) if last else None})
+
+    if not readable:
+        return {"proposed": [], "applied": [], "skipped": skipped,
+                "people_readable": False, "identities_considered": len(rows)}
+
+    by_email = {}
+    for r in rows:
+        for e in owned_emails(r):
+            by_email[e] = r
+
+    # --- farewell --------------------------------------------------------------
+    if "farewell" in rules:
+        for t in farewell_threads():
+            subj = (t.get("subject") or "").strip()
+            when = t.get("timestamp") or 0
+            # notmuch's search `authors` field is DISPLAY NAMES, not addresses --
+            # reading emails out of it silently matches nothing. Resolve the real
+            # senders per thread; the pattern set keeps this to a handful of calls.
+            for e in thread_senders(t.get("thread") or ""):
+                if e in SELF or e not in by_email:
+                    continue
+                r = by_email[e]
+                last = r["email_last"] or 0
+                if last and (last - when) > LAST_WORD_DAYS * 86400:
+                    skipped["not_last_word"] += 1
+                    continue
+                propose(r, e, "farewell", 'farewell:"%s" %s' % (
+                    subj[:80].replace('"', "'"),
+                    datetime.date.fromtimestamp(when).isoformat() if when else "?"))
+
+    # --- terminated ------------------------------------------------------------
+    if "terminated" in rules:
+        by_slug, by_name = {}, {}
+        for r in rows:
+            pf = (CFG.row_get(r, "person_file") or "").lower()
+            if pf:
+                by_slug.setdefault(pf, r)
+            by_name.setdefault(norm_name(r["name"]), r)
+        for d in departed:
+            r = by_slug.get(d["slug"]) or by_name.get(norm_name(d["name"]))
+            keys = list(d["emails"])
+            if r:
+                keys += owned_emails(r)
+            elif not keys:
+                continue
+            for key in dict.fromkeys(keys):
+                target = r or by_email.get(key)
+                if target is None:
+                    continue
+                propose(target, key, "terminated",
+                        "people file says departed (%s)" % d["slug"])
+
+    applied = []
+    if apply_writes and props:
+        with open(SUPPRESS, "a", encoding="utf-8") as fh:
+            for p in props:
+                fh.write("%s\t%s\t%s\t%s\n" % (p["key"], p["scope"], p["reason"], today))
+                applied.append(p)
+        write_til(applied)
+    return {"proposed": props, "applied": applied, "skipped": skipped,
+            "people_readable": True, "identities_considered": len(rows)}
+
+
+def write_til(applied):
+    """The machine suppressed a relationship on its own. A later review has to be able
+    to see that it did, and overrule it."""
+    d = CFG.observations_dir()
+    try:
+        os.makedirs(d, exist_ok=True)
+        day = os.path.join(d, datetime.date.today().isoformat() + ".md")
+        new = not os.path.exists(day)
+        with open(day, "a", encoding="utf-8") as fh:
+            if new:
+                fh.write("# Observations — %s\n" % datetime.date.today().isoformat())
+            fh.write("\n## [%s] mesh: %d relationship(s) auto-suppressed from drift\n"
+                     % (time.strftime("%H:%M"), len(applied)))
+            for p in applied:
+                fh.write("- `%s` (%s) — rule `%s` — %s\n"
+                         % (p["key"], p["name"], p["rule"], p["reason"]))
+            fh.write("Drift will stop nudging about these. Work addresses only; personal "
+                     "stays. If one is wrong, delete its line from `mesh-suppress.tsv` and "
+                     "the relationship returns. tags: [mesh, suppression, drift]\n")
+    except OSError:
+        pass
+
+
+def main():
+    import argparse
+    ap = argparse.ArgumentParser(description="propose/apply mesh drift suppressions")
+    ap.add_argument("--apply", action="store_true", help="write the proposals (default: dry run)")
+    ap.add_argument("--rules", default="farewell,terminated", help="comma list: farewell,terminated")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args()
+    res = sweep({x.strip() for x in a.rules.split(",") if x.strip()}, a.apply)
+    if a.json:
+        print(json.dumps(res, indent=2))
+    else:
+        print("suppress-sweep (%s): %d proposed, %d applied  [%s]"
+              % ("APPLY" if a.apply else "dry-run", len(res["proposed"]),
+                 len(res["applied"]),
+                 " ".join("%s=%d" % (k, v) for k, v in sorted(res["skipped"].items()) if v)))
+        for p in res["proposed"]:
+            print("  %-10s %-32s %-22s %s"
+                  % (p["rule"], p["key"], p["name"][:22], p["reason"][:56]))
+        if not res["people_readable"]:
+            print("  people dir unreadable — proposed nothing (BEDROCK could not be excluded)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

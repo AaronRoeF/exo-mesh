@@ -34,6 +34,7 @@ __all__ = [
     "accounts", "email_for", "emails", "self_emails", "owner_name", "owner_short",
     "signoff", "notes_dir", "people_dir", "workdir", "archdoc_out", "caps_url",
     "notmuch_bin", "col_of", "row_get", "account_maildir", "describe",
+    "observations_dir",
 ]
 
 BIN = os.path.dirname(os.path.abspath(__file__))
@@ -264,6 +265,14 @@ def people_dir():
         return v
     n = notes_dir()
     return os.path.join(n, "people") if n else ""
+
+
+def observations_dir():
+    """Where a tool drops a note when it decided something on its own. Unset falls back
+    to the workdir, so an unconfigured install still records its own decisions somewhere
+    rather than silently discarding them."""
+    v = _path("EXO_MAIL_OBS", "")
+    return v or os.path.join(workdir(), "observations")
 
 
 def workdir():

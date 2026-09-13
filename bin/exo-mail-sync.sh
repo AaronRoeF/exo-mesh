@@ -64,6 +64,9 @@ step index    "$BIN/exo-mail-index"
 step calendar "$BIN/exo-cal" pull-all
 step imessage "$BIN/exo-imsg" snapshot
 step mesh-resolve "$BIN/exo-mesh-resolve"
+# Drift must not nudge about relationships that ENDED. Dry run by default: review a
+# week of proposals first, then add --apply once you trust what it finds.
+[ -x "$BIN/exo-mesh-suppress-sweep" ] && step suppress-sweep "$BIN/exo-mesh-suppress-sweep"
 EXO_LABEL_PUSH=1 "$BIN/exo-mail-classify" >>"$LOG" 2>&1 || echo "$(date '+%F %T') classify step failed" >>"$LOG"
 step needs-reply "$BIN/exo-mail-needsreply"
 
