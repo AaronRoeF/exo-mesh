@@ -122,6 +122,7 @@ mail root are read from `notmuch config`, which you set up anyway.
 | [03-SAFETY.md](docs/03-SAFETY.md) | What writes, what cannot, and every gate |
 | [04-CONFIG.md](docs/04-CONFIG.md) | Every setting, how it resolves, worked example |
 | [05-LIMITATIONS.md](docs/05-LIMITATIONS.md) | Where this does not work, honestly |
+| [06-COMMANDS.md](docs/06-COMMANDS.md) | Every command and what it gets you — the reference. |
 
 ---
 
