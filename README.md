@@ -4,13 +4,9 @@
 the fragment one inbox remembers. Mail, calendar, iMessage and contacts, joined on
 your own disk into one record per person.**
 
-You've already lived the failure. You open with "it's been forever!" to someone you
-texted on Tuesday, because the email thread said six months and nothing thought to
-ask the phone.
-
 Four systems hold four fragments of the same relationship, and there's no seam
 between them. So the question you actually have — *when did I last talk to Priya, and
-about what?* — costs four searches and a guess.
+about what?* — costs four searches and a guess. What are our open items? Where did we leave off? 
 
 exo-mesh answers it in one local read. It mirrors your Gmail to a
 [notmuch](https://notmuchmail.org/)-indexed Maildir, pulls your calendars, takes a
