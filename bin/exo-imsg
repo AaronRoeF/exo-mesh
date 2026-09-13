@@ -1,0 +1,206 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+DOC = """exo-imsg — iMessage/SMS/RCS local replica. Phase 1: snapshot + cursor.
+
+READ-ONLY against ~/Library/Messages/chat.db. Never writes to it, ever.
+Mirrors exo-mail-sync: atomic lock, incremental cursor, JSONL audit, fails loud.
+
+  exo-imsg snapshot   WAL-consistent copy + advance cursor + audit
+  exo-imsg status     cursor, counts, freshness
+  exo-imsg test       built-in self-checks (T1-T4, T10)
+
+TCC: chat.db is protected by Full Disk Access. Without it this reads ZERO ROWS
+WITH NO ERROR -- indistinguishable from an empty database. Every path below
+asserts rows>0 and fails loud rather than succeeding quietly.
+"""
+import json, os, sqlite3, sys, time, shutil, datetime
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+
+HOME   = os.path.expanduser("~")
+LIVE   = f"{HOME}/Library/Messages/chat.db"
+ROOT   = CFG.store_path("imessage")
+SNAP   = f"{ROOT}/snapshot.db"
+STATE  = f"{ROOT}/.state.imessage.json"
+AUDIT  = CFG.store_path("audit.jsonl")
+LOCK   = f"{ROOT}/.snapshot.lock.d"
+
+def ts(): return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def audit(**kw):
+    kw.setdefault("at", ts())
+    os.makedirs(os.path.dirname(AUDIT), exist_ok=True)
+    with open(AUDIT, "a") as f: f.write(json.dumps(kw) + "\n")
+
+def die(msg, **kw):
+    audit(action="imsg.error", error=msg, **kw)
+    print(f"exo-imsg: {msg}", file=sys.stderr); sys.exit(1)
+
+def ro(path):
+    """Open strictly read-only. immutable=0 so WAL is honoured."""
+    return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+def load_state():
+    try:
+        with open(STATE) as f: return json.load(f)
+    except Exception: return {"last_rowid": 0, "runs": 0}
+
+def save_state(s):
+    os.makedirs(ROOT, exist_ok=True)
+    tmp = STATE + ".tmp"
+    with open(tmp, "w") as f: json.dump(s, f, indent=2)
+    os.replace(tmp, STATE)          # atomic
+
+def probe(path):
+    """Counts used by the TCC canary and T1. Raises on unreadable."""
+    c = ro(path)
+    try:
+        n   = c.execute("select count(*) from message").fetchone()[0]
+        mx  = c.execute("select coalesce(max(ROWID),0) from message").fetchone()[0]
+        svc = dict(c.execute(
+            "select coalesce(service,'?'),count(*) from message group by 1").fetchall())
+        return n, mx, svc
+    finally: c.close()
+
+# ---------------------------------------------------------------- snapshot
+def cmd_snapshot(argv):
+    t0 = time.time()
+    os.makedirs(ROOT, exist_ok=True)
+    try: os.mkdir(LOCK)
+    except FileExistsError:
+        print("skip: snapshot already running"); return 0
+    try:
+        if not os.path.exists(LIVE): die("chat.db not found", path=LIVE)
+
+        # --- TCC CANARY. Zero rows here means no Full Disk Access, not an empty DB.
+        try:
+            live_n, live_max, live_svc = probe(LIVE)
+        except sqlite3.OperationalError as e:
+            die(f"cannot read chat.db ({e}) - grant Full Disk Access to the scheduled job")
+        if live_n == 0:
+            die("chat.db returned ZERO rows - almost certainly missing Full Disk Access, "
+                "not an empty database. Refusing to advance the cursor.")
+
+        st = load_state()
+        if live_max < st["last_rowid"]:
+            die(f"cursor regression: live max ROWID {live_max} < last_rowid {st['last_rowid']} "
+                "- database may have been replaced. Refusing to proceed.",
+                live_max=live_max, last_rowid=st["last_rowid"])
+
+        # --- WAL-consistent copy. sqlite3 .backup, NOT cp (cp loses the WAL).
+        tmp = SNAP + ".tmp"
+        if os.path.exists(tmp): os.remove(tmp)
+        src = ro(LIVE); dst = sqlite3.connect(tmp)
+        try: src.backup(dst)
+        finally: dst.close(); src.close()
+        os.replace(tmp, SNAP)
+
+        snap_n, snap_max, snap_svc = probe(SNAP)
+
+        # --- T1 fidelity gate: >1% divergence means the copy is wrong, not just racy.
+        drift = abs(snap_n - live_n) / max(live_n, 1)
+        if drift > 0.01:
+            die(f"snapshot divergence {drift:.2%} (live {live_n} vs snap {snap_n}) - aborting",
+                live=live_n, snap=snap_n)
+
+        new_rows = 0
+        if snap_max > st["last_rowid"]:
+            c = ro(SNAP)
+            new_rows = c.execute("select count(*) from message where ROWID > ?",
+                                 (st["last_rowid"],)).fetchone()[0]
+            c.close()
+
+        prev = st["last_rowid"]
+        st.update(last_rowid=snap_max, runs=st.get("runs", 0) + 1,
+                  last_run=ts(), rows=snap_n, services=snap_svc)
+        save_state(st)
+
+        secs = round(time.time() - t0, 1)
+        audit(action="sync.imessage", rc=0, secs=secs, rows=snap_n,
+              last_rowid=snap_max, prev_rowid=prev, new_rows=new_rows,
+              services=snap_svc, snapshot_mb=round(os.path.getsize(SNAP)/1048576, 1))
+        print(f"ok  rows={snap_n:,}  new={new_rows:,}  cursor {prev} -> {snap_max}  {secs}s")
+        return 0
+    finally:
+        try: os.rmdir(LOCK)
+        except Exception: pass
+
+# ------------------------------------------------------------------ status
+def cmd_status(argv):
+    st = load_state()
+    out = {"ok": True, "data": {
+        "last_rowid": st.get("last_rowid", 0), "runs": st.get("runs", 0),
+        "last_run": st.get("last_run"), "rows": st.get("rows"),
+        "services": st.get("services", {}),
+        "snapshot_exists": os.path.exists(SNAP),
+        "snapshot_mb": round(os.path.getsize(SNAP)/1048576, 1) if os.path.exists(SNAP) else 0,
+    }}
+    if os.path.exists(SNAP):
+        age = time.time() - os.path.getmtime(SNAP)
+        out["data"]["snapshot_age_min"] = round(age/60, 1)
+    if "--json" in argv: print(json.dumps(out, indent=2)); return 0
+    d = out["data"]
+    print(f"  cursor      {d['last_rowid']:,}")
+    print(f"  rows        {(d['rows'] or 0):,}")
+    print(f"  runs        {d['runs']}   last {d['last_run']}")
+    print(f"  snapshot    {d['snapshot_mb']} MB, {d.get('snapshot_age_min','-')} min old")
+    for k, v in sorted((d['services'] or {}).items(), key=lambda x: -x[1]):
+        print(f"    {k:<14} {v:,}")
+    return 0
+
+# -------------------------------------------------------------------- test
+def cmd_test(argv):
+    fails = []
+    def check(name, cond, detail=""):
+        print(f"  [{'PASS' if cond else 'FAIL'}] {name}  {detail}")
+        if not cond: fails.append(name)
+
+    print("T2  TCC canary (must be non-zero, and must fail loud if FDA missing)")
+    try:
+        live_n, live_max, live_svc = probe(LIVE)
+        check("T2 live readable, rows>0", live_n > 0, f"rows={live_n:,}")
+    except Exception as e:
+        check("T2 live readable", False, str(e)); live_n = live_max = 0; live_svc = {}
+
+    print("T1  snapshot fidelity")
+    if os.path.exists(SNAP):
+        snap_n, snap_max, snap_svc = probe(SNAP)
+        drift = abs(snap_n - live_n)/max(live_n, 1)
+        check("T1 count within 1%", drift <= 0.01, f"live={live_n:,} snap={snap_n:,} drift={drift:.3%}")
+        check("T1 services match", set(snap_svc) == set(live_svc),
+              f"{sorted(snap_svc)} vs {sorted(live_svc)}")
+        check("T1 RCS present", snap_svc.get("RCS", 0) > 0, f"RCS={snap_svc.get('RCS',0):,}")
+    else:
+        check("T1 snapshot exists", False, "run `exo-imsg snapshot` first")
+
+    print("T3  cursor idempotence")
+    st = load_state()
+    if os.path.exists(SNAP):
+        c = ro(SNAP)
+        beyond = c.execute("select count(*) from message where ROWID > ?",
+                           (st.get("last_rowid", 0),)).fetchone()[0]; c.close()
+        check("T3 nothing beyond cursor after snapshot", beyond == 0, f"beyond={beyond}")
+
+    print("T4  deletion tolerance (ROWID gaps must not break ranged reads)")
+    if os.path.exists(SNAP):
+        c = ro(SNAP)
+        n, mx = c.execute("select count(*), max(ROWID) from message").fetchone()
+        ranged = c.execute("select count(*) from message where ROWID between 1 and ?", (mx,)).fetchone()[0]
+        c.close()
+        check("T4 ranged read == full count", ranged == n, f"gaps={mx-n:,} ranged={ranged:,} n={n:,}")
+
+    print("T10 read-only invariant (chat.db must be untouched)")
+    before = (os.path.getmtime(LIVE), os.path.getsize(LIVE))
+    try: probe(LIVE)
+    except Exception: pass
+    after = (os.path.getmtime(LIVE), os.path.getsize(LIVE))
+    check("T10 chat.db mtime+size unchanged by our reads", before == after, f"{before} -> {after}")
+
+    print(f"\n  {'ALL PASS' if not fails else 'FAILED: ' + ', '.join(fails)}")
+    return 1 if fails else 0
+
+CMDS = {"snapshot": cmd_snapshot, "status": cmd_status, "test": cmd_test}
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help") or a[0] not in CMDS:
+        print(DOC); sys.exit(0 if a and a[0] in ("-h","--help") else 2)
+    sys.exit(CMDS[a[0]](a[1:]))

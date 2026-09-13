@@ -1,0 +1,13 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+# exo-mail wrapper around lieer: sets the Gmail query lieer has no flag for
+# (Remote.query is a hardcoded class attribute).
+# Default: drop chats, spam, trash and anything over 250K; full history otherwise.
+# Override per-account with EXO_GMI_QUERY.
+import os
+from lieer import Gmailieer, Remote
+Remote.query = os.environ.get(
+    "EXO_GMI_QUERY",
+    "-in:chats -in:spam -in:trash -larger:250K",
+)
+Gmailieer().main()

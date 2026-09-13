@@ -1,0 +1,241 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+"""exo-mail-contacts-merge — merge the three contact sources into ONE clean master.
+
+Sources (read-only):
+  per account   gcontacts-<account>.json in the work dir (Google People API export)
+  Apple         the live default AddressBook source (SQLite)
+
+Method: link records that share a real email or a real phone (last-10-digits),
+with a shared-line guard (a key touching >4 distinct names is an office/shared
+line and does NOT link). Name alone never links (too many collisions). Each
+cluster becomes one canonical person with merged fields, provenance, and a
+quality flag (clean / dead / garbage). Company names are standardized.
+
+Writes: contacts-master.json + contacts-master.md in the work dir, and
+contacts-master.db in the store (the mesh master store). Touches no cloud,
+no Contacts app, no source.
+"""
+import json, os, re, sys, sqlite3, glob, collections, subprocess, datetime
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+
+PROJ = CFG.workdir()
+MASTER_DB = CFG.store_path("contacts-master.db")
+SOCIAL_ORGS = ("twitter", "linkedin", "facebook", "instagram", "x corp", "tiktok")
+NONPERSON = ("no-reply", "noreply", "donotreply", "do-not-reply", "remove@", "unsubscribe",
+             "everyone@", "info@", "support@", "sales@", "admin@", "postmaster@", "mailer-daemon")
+SHARED_KEY_NAMEMAX = 4      # a key on >4 distinct names = shared/office line, don't link
+
+def nphone(v):
+    v = re.split(r"(?i)[x;,]|ext", v or "", 1)[0]   # drop extension before digit-extraction
+    d = re.sub(r"\D", "", v)
+    return d[-10:] if len(d) >= 10 else ""
+
+def nemail(v):
+    e = (v or "").strip().lower()
+    return "" if (not e or "@" not in e or any(s in e for s in NONPERSON)) else e
+
+def nname(first, last, org):
+    n = re.sub(r"\s+", " ", ("%s %s" % (first or "", last or "")).strip().lower())
+    return n or (org or "").strip().lower()
+
+def norm_org(o):
+    o = (o or "").lower().strip(); o = re.sub(r"[.,]", "", o)
+    o = re.sub(r"\b(inc|llc|ltd|corp|corporation|co|company|gmbh|plc|the)\b", "", o)
+    return re.sub(r"\s+", " ", o).strip()
+
+def icloud_db():
+    srcs = glob.glob(os.path.expanduser("~/Library/Application Support/AddressBook/Sources/*/AddressBook-v22.abcddb"))
+    did = subprocess.run(["defaults", "read", "com.apple.AddressBook", "ABDefaultSourceID"],
+                         capture_output=True, text=True).stdout.strip()
+    for s in srcs:
+        if did and did in s:
+            return s
+    return max(srcs, key=os.path.getmtime) if srcs else None
+
+def load_records():
+    recs = []  # each: {source, sid, first, last, org, title, emails[], phones[]}
+    for acct in CFG.accounts():
+        p = os.path.join(PROJ, "gcontacts-%s.json" % acct)
+        if not os.path.exists(p):
+            continue
+        for pr in json.load(open(p))["people"]:
+            nm = (pr.get("names") or [{}])[0]
+            org = (pr.get("organizations") or [{}])[0]
+            recs.append({"source": acct, "sid": pr.get("resourceName"),
+                         "first": nm.get("givenName"), "last": nm.get("familyName"),
+                         "disp": nm.get("displayName"), "org": org.get("name"), "title": org.get("title"),
+                         "emails": [e.get("value") for e in pr.get("emailAddresses", []) if e.get("value")],
+                         "phones": [x.get("value") for x in pr.get("phoneNumbers", []) if x.get("value")]})
+    db = icloud_db()
+    if db:
+        c = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+        rows = {pk: {"source": "icloud", "sid": uid, "first": fn, "last": ln, "disp": None,
+                     "org": org, "title": None, "emails": [], "phones": []}
+                for pk, uid, fn, ln, org in c.execute(
+                    "SELECT Z_PK,ZUNIQUEID,ZFIRSTNAME,ZLASTNAME,ZORGANIZATION FROM ZABCDRECORD")}
+        for owner, num in c.execute("SELECT ZOWNER,ZFULLNUMBER FROM ZABCDPHONENUMBER"):
+            if owner in rows and num: rows[owner]["phones"].append(num)
+        for owner, ad in c.execute("SELECT ZOWNER,ZADDRESS FROM ZABCDEMAILADDRESS"):
+            if owner in rows and ad: rows[owner]["emails"].append(ad)
+        c.close()
+        recs.extend(rows.values())
+    return recs
+
+class UF:
+    def __init__(self, n): self.p = list(range(n))
+    def find(self, x):
+        while self.p[x] != x: self.p[x] = self.p[self.p[x]]; x = self.p[x]
+        return x
+    def union(self, a, b): self.p[self.find(a)] = self.find(b)
+
+def main():
+    recs = load_records()
+    N = len(recs)
+    # precompute normalized keys per record
+    for r in recs:
+        r["_em"] = set(filter(None, (nemail(e) for e in r["emails"])))
+        r["_ph"] = set(filter(None, (nphone(p) for p in r["phones"])))
+        r["_nm"] = nname(r["first"], r["last"], r["org"])
+
+    # build key -> record indices, and distinct-name counts to spot shared lines
+    ekey, pkey = collections.defaultdict(list), collections.defaultdict(list)
+    for i, r in enumerate(recs):
+        for e in r["_em"]: ekey[e].append(i)
+        for p in r["_ph"]: pkey[p].append(i)
+    def names_on(idxs): return {recs[i]["_nm"] for i in idxs if recs[i]["_nm"]}
+
+    def toks(i): return {t for t in recs[i]["_nm"].split() if len(t) >= 2}
+    def compat(i, j):
+        a, b = toks(i), toks(j)
+        return (not a or not b) or bool(a & b)   # empty name = unknown = allow; else need a shared token
+    uf = UF(N)
+    # STRONG: a shared personal email links records (guard shared mailboxes on >4 names)
+    for k, idxs in ekey.items():
+        if len(idxs) < 2 or len(names_on(idxs)) > SHARED_KEY_NAMEMAX:
+            continue
+        for j in idxs[1:]:
+            uf.union(idxs[0], j)
+    # WEAK: a shared phone links only NAME-COMPATIBLE records (couples/families/office
+    # lines share numbers — chaining on phone alone fuses unrelated people).
+    for k, idxs in pkey.items():
+        if len(idxs) < 2 or len(names_on(idxs)) > SHARED_KEY_NAMEMAX:
+            continue
+        for a_i in range(len(idxs)):
+            for b_i in range(a_i + 1, len(idxs)):
+                if compat(idxs[a_i], idxs[b_i]):
+                    uf.union(idxs[a_i], idxs[b_i])
+
+    clusters = collections.defaultdict(list)
+    for i in range(N): clusters[uf.find(i)].append(i)
+
+    # company canonicalization map (variant -> canonical = most common raw form per normalized org)
+    orgcount = collections.defaultdict(collections.Counter)
+    for r in recs:
+        if r["org"]: orgcount[norm_org(r["org"])][r["org"]] += 1
+    canon = {}
+    for base, ctr in orgcount.items():
+        best = max(ctr.items(), key=lambda kv: (kv[1], -len(kv[0])))[0]
+        for raw in ctr: canon[raw] = best
+
+    def build(idxs):
+        rs = [recs[i] for i in idxs]
+        emails, phones, srcs, sids = [], [], set(), collections.defaultdict(list)
+        for r in rs:
+            srcs.add(r["source"]); sids[r["source"]].append(r["sid"])
+            for e in r["emails"]:
+                if e not in emails: emails.append(e)
+            for p in r["phones"]:
+                if p not in phones: phones.append(p)
+        # best name: prefer a record with both first+last, else longest display/name
+        named = sorted(rs, key=lambda r: (bool(r["first"] and r["last"]),
+                       len((r["disp"] or ("%s %s" % (r["first"] or "", r["last"] or "")).strip()))), reverse=True)
+        top = named[0]
+        disp = (top["disp"] or ("%s %s" % (top["first"] or "", top["last"] or "")).strip())
+        # best org (most complete, canonicalized)
+        orgs = [r["org"] for r in rs if r["org"]]
+        org = canon.get(collections.Counter(orgs).most_common(1)[0][0]) if orgs else None
+        title = next((r["title"] for r in rs if r.get("title")), None)
+        # quality
+        has_contact = bool(emails or phones)
+        nm = disp.strip()
+        surnames = {(r["last"] or "").strip().lower() for r in rs if (r["last"] or "").strip()}
+        q, flags = "clean", []
+        if not nm and not org:
+            q, flags = "garbage", ["no name/org"]
+        elif re.match(r"^\S+@\S+$", nm) or nm.startswith("@"):
+            q, flags = "garbage", ["name is a handle"]
+        elif nm.lower() in ("spam", "junk", "blocked", "scam", "do not answer", "unknown"):
+            q, flags = "garbage", ["junk-drawer contact"]
+        elif org and any(s in org.lower() for s in SOCIAL_ORGS):
+            q, flags = "garbage", ["social-network org"]
+        elif not has_contact:
+            q, flags = "dead", ["no email or phone"]
+        elif len(surnames) > 2 or len(emails) > 6:
+            q, flags = "review", ["possible over-merge: %d surnames, %d emails" % (len(surnames), len(emails))]
+        return {"name": disp or org or "(no name)", "first": top["first"], "last": top["last"],
+                "org": org, "title": title, "emails": emails, "phones": phones,
+                "sources": sorted(srcs), "n_sources": len(srcs), "source_ids": dict(sids),
+                "quality": q, "flags": flags}
+
+    persons = [build(idxs) for idxs in clusters.values()]
+    for i, p in enumerate(persons):
+        p["id"] = "c%05d" % i
+    # company-rename edits (variant -> canonical) for the review surface
+    cedits = []
+    for base, ctr in orgcount.items():
+        best = canon.get(next(iter(ctr)))
+        variants = [{"raw": raw, "count": n} for raw, n in ctr.items() if raw != best]
+        if variants:
+            cedits.append({"canonical": best, "variants": variants,
+                           "total": sum(v["count"] for v in variants)})
+    cedits.sort(key=lambda x: -x["total"])
+    json.dump(cedits, open(os.path.join(PROJ, "contacts-company-edits.json"), "w"), indent=2)
+    clean = [p for p in persons if p["quality"] == "clean"]
+    review = [p for p in persons if p["quality"] == "review"]
+    dead = [p for p in persons if p["quality"] == "dead"]
+    garbage = [p for p in persons if p["quality"] == "garbage"]
+    multi = [p for p in clean if p["n_sources"] >= 2]
+
+    # write master json
+    json.dump({"generated": datetime.date.today().isoformat(), "raw_records": N,
+               "persons": persons}, open(os.path.join(PROJ, "contacts-master.json"), "w"), indent=2)
+
+    # write master db (the mesh master store)
+    os.makedirs(os.path.dirname(MASTER_DB), exist_ok=True)
+    con = sqlite3.connect(MASTER_DB)
+    con.execute("DROP TABLE IF EXISTS master")
+    con.execute("""CREATE TABLE master(id INTEGER PRIMARY KEY, name TEXT, org TEXT, title TEXT,
+                   emails TEXT, phones TEXT, sources TEXT, n_sources INT, quality TEXT)""")
+    for i, p in enumerate(persons):
+        con.execute("INSERT INTO master VALUES(?,?,?,?,?,?,?,?,?)",
+                    (i, p["name"], p["org"], p["title"], " ".join(p["emails"]), " ".join(p["phones"]),
+                     ",".join(p["sources"]), p["n_sources"], p["quality"]))
+    con.commit(); con.close()
+
+    # human summary
+    md = ["# Contacts master — merged across 3 sources (%s)\n" % datetime.date.today().isoformat(),
+          "Read-only merge. No cloud, no Contacts, no source was modified.\n",
+          "| Metric | Count |", "|---|---|",
+          "| Raw records in (work+personal+iCloud) | %d |" % N,
+          "| Canonical persons (master) | %d |" % len(persons),
+          "| — clean | %d |" % len(clean),
+          "| — in 2+ sources (were duplicated across stores) | %d |" % len(multi),
+          "| — review (possible over-merge, flagged) | %d |" % len(review),
+          "| — dead (no email/phone) | %d |" % len(dead),
+          "| — garbage (no-name / handle / social / junk) | %d |" % len(garbage),
+          "| Collapse ratio | %d → %d (%.0f%% fewer) |" % (N, len(persons), 100*(1-len(persons)/N)),
+          "\n## Sample multi-source merges (same person, was in 2-3 stores)\n"]
+    for p in sorted(multi, key=lambda x: -x["n_sources"])[:15]:
+        md.append("- **%s** — %s · %d emails · %d phones · sources: %s" %
+                  (p["name"], p["org"] or "", len(p["emails"]), len(p["phones"]), "+".join(p["sources"])))
+    open(os.path.join(PROJ, "contacts-master.md"), "w").write("\n".join(md) + "\n")
+
+    print(json.dumps({"raw_records": N, "canonical_persons": len(persons),
+                      "clean": len(clean), "multi_source": len(multi), "review": len(review),
+                      "dead": len(dead), "garbage": len(garbage),
+                      "master_db": MASTER_DB}, indent=2))
+
+if __name__ == "__main__":
+    main()

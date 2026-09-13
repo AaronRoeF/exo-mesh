@@ -1,0 +1,71 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+"""exo-mail-commitments — extract commitments you made in the last 30d of sent
+mail and file them as Things tasks in the '📧 Email Commitments' project.
+Deduped against Things, capped, non-noisy. macOS + Things 3 only.
+
+  exo-mail-commitments               DRY RUN — print what would be filed
+  exo-mail-commitments --candidates  emit JSON candidates, one per line
+  exo-mail-commitments --apply       actually create the Things tasks
+
+Filing is opt-in because it writes into another application: without --apply
+nothing leaves this process."""
+import subprocess,re,os,sqlite3,urllib.parse,time,glob
+import sys,json
+CAND = ('--candidates' in sys.argv)   # emit JSON candidates, write nothing
+APPLY = ('--apply' in sys.argv)       # only this actually creates Things tasks
+from email.parser import BytesParser
+from email import policy
+from email.utils import parseaddr
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+NM=CFG.notmuch_bin()
+SELF_Q=" or ".join("from:%s" % e for e in sorted(CFG.self_emails()))
+TDB=glob.glob(os.path.expanduser("~/Library/Group Containers/*/ThingsData-*/Things Database.thingsdatabase/main.sqlite"))
+TDB=TDB[0] if TDB else None
+PROJECT="📧 Email Commitments"; CAP=(40 if CAND else 15)
+PROM=re.compile(r"\b(i|we)\s?['\u2019]?ll\b\s+(?:\w+\s+){0,3}(send|share|get you|get back to|have|provide|put together|pull together|draft|write up|write you|schedule|set up|follow up|circle back|loop you|introduce|intro|connect you|review|sign|file|forward|send over|send you)\b|\bi\s?['\u2019]?m going to\s+(?:\w+\s+){0,3}(send|share|schedule|set up|draft|put together|write|review|sign|file|introduce|connect|follow up)\b|\bi will\s+(?:\w+\s+){0,3}(send|share|get|have|provide|draft|schedule|set up|review|sign|file|introduce|connect|follow up|write)\b",re.I)
+def nm(*a): return subprocess.run([NM,*a],capture_output=True,text=True).stdout
+# existing commitment titles (dedup)
+existing=set()
+if TDB:
+    con=sqlite3.connect(TDB)
+    pu=con.execute("SELECT uuid FROM TMTask WHERE type=1 AND title LIKE '%Email Commitments%' AND trashed=0").fetchone()
+    if pu:
+        existing=set(r[0] for r in con.execute("SELECT title FROM TMTask WHERE project=? AND trashed=0",[pu[0]]))
+# last 30 days of your own sent mail
+files=nm("search","--output=files","--sort=newest-first","(%s) and date:30d.." % SELF_Q).splitlines()
+made=0
+for fp in files:
+    if made>=CAP: break
+    try:
+        with open(fp,"rb") as f: msg=BytesParser(policy=policy.default).parse(f)
+        part=msg.get_body(preferencelist=("plain",)); txt=part.get_content() if part else ""
+    except Exception: continue
+    to_name,to_addr=parseaddr(str(msg.get("To") or "")); date=str(msg.get("Date") or "")[:16]
+    # keep only the top of the reply: cut at the first quote/original/forward/signature marker
+    cut=len(txt)
+    for pat in [r"\nOn .*wrote:", r"\n>", r"\n-----Original", r"\nFrom: ", r"\n________+", r"\n-- \n", r"\n~" + "".join(p[0].lower() for p in CFG.owner_name().split()) + r"\b", r"\nSent from my "]:
+        m=re.search(pat,txt)
+        if m: cut=min(cut,m.start())
+    txt=txt[:cut]
+    for sent in re.split(r"(?<=[.!?])\s+|\n",txt):
+        sent=" ".join(sent.split()); sl=sent.lower()
+        if "?" in sent or sl.startswith(("can you","could you","would you","will you","re:","fwd:","http")): continue
+        if sent.endswith(":") or "[" in sent or "]" in sent: continue          # list headers / [LINK] junk
+        if re.match(r"^[A-Z][a-z]+ [\u2013\-] ", sent): continue                # "Name – ..." quoted attribution
+        if 20<len(sent)<140 and PROM.search(sent):
+            title=sent[:120]
+            if title in existing: break
+            notes="→ %s <%s> · %s"%(to_name or to_addr, to_addr, date)
+            q=lambda v: urllib.parse.quote(str(v),safe="")
+            url="things:///add?"+"&".join("%s=%s"%(k,q(v)) for k,v in [("title",title),("list",PROJECT),("notes",notes)])
+            if CAND: print(json.dumps({"title":title,"to":to_name or to_addr,"to_addr":to_addr,"date":date})); made+=1; existing.add(title)
+            elif os.environ.get("EXO_DRY"): print("DRY:",title,"->",url[:90]); made+=1; existing.add(title)
+            elif APPLY: subprocess.run(["open",url]); time.sleep(0.3); existing.add(title); made+=1
+            else: print("  DRY would file: %s" % title); existing.add(title); made+=1
+            break
+
+if not CAND:
+    print("commitments filed to Things: %d" % made if APPLY
+          else "DRY RUN: %d commitment(s) would be filed. Re-run with --apply to write." % made)

@@ -1,0 +1,177 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+DOC = """exo-cal — local-first calendar replica (P7). Mirrors the mail stack.
+
+  exo-cal auth <work|personal>     one-time Google consent (calendar.readonly)
+  exo-cal pull-google <work|personal>   events.list → calendar.db (windowed)
+  exo-cal pull-apple                    Apple Calendar SQLite → calendar.db
+  exo-cal pull-all                      apple + both google (skips un-authed)
+  exo-cal stats                         what's in the replica
+
+Store: calendar.db  events(uid PK, source, calendar, title, start,
+end, all_day, location, organizer, attendees, status, updated). Read-only against
+every source; never writes a calendar. Google reuses the exo-mail OAuth clients.
+"""
+import sys, os, json, sqlite3, glob, subprocess, urllib.request, urllib.parse, http.server, socket, webbrowser, time, datetime
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+
+DB = CFG.store_path("calendar.db")
+SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
+# One OAuth client per account: the first account reuses the default client file,
+# the rest get a per-account one. Same convention as the mail pull.
+def _client_file(a):
+    accs = CFG.accounts()
+    base = "gcp-oauth.keys.json" if (accs and a == accs[0]) else "gcp-oauth-%s.keys.json" % a
+    return os.path.join(CFG.config_dir(), base)
+CLIENT = dict((a, _client_file(a)) for a in CFG.accounts())
+TOKEN = lambda a: os.path.join(CFG.config_dir(), "gcal-%s.token.json" % a)
+EMAIL = CFG.emails()
+COCOA = 978307200  # 2001-01-01 → unix
+WINDOW_PAST_DAYS = 730
+WINDOW_FUTURE_DAYS = 365
+
+def db():
+    os.makedirs(os.path.dirname(DB), exist_ok=True)
+    c = sqlite3.connect(DB)
+    c.execute("""CREATE TABLE IF NOT EXISTS events(
+        uid TEXT PRIMARY KEY, source TEXT, calendar TEXT, title TEXT, start REAL, "end" REAL,
+        all_day INT, location TEXT, organizer TEXT, attendees TEXT, status TEXT, updated REAL)""")
+    return c
+
+def upsert(c, rows):
+    c.executemany("""INSERT INTO events(uid,source,calendar,title,start,"end",all_day,location,organizer,attendees,status,updated)
+        VALUES(:uid,:source,:calendar,:title,:start,:end,:all_day,:location,:organizer,:attendees,:status,:updated)
+        ON CONFLICT(uid) DO UPDATE SET source=excluded.source,calendar=excluded.calendar,title=excluded.title,
+        start=excluded.start,"end"=excluded."end",all_day=excluded.all_day,location=excluded.location,
+        organizer=excluded.organizer,attendees=excluded.attendees,status=excluded.status,updated=excluded.updated""", rows)
+
+# ---------- Google OAuth: loopback flow, refresh token stored mode 600 ----------
+def client(acct): d = json.load(open(CLIENT[acct])); return d.get("installed") or d.get("web")
+
+def auth(acct):
+    c = client(acct); port = int(os.environ.get("EXO_OAUTH_PORT", "55871"))
+    redirect = "http://127.0.0.1:%d/" % port
+    url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(
+        {"client_id": c["client_id"], "redirect_uri": redirect, "response_type": "code",
+         "scope": SCOPE, "access_type": "offline", "prompt": "consent", "login_hint": EMAIL[acct]})
+    box = {}
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            box.update(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query))
+            self.send_response(200); self.end_headers()
+            self.wfile.write(b"<h2>exo-cal: you can close this tab.</h2>")
+        def log_message(self, *a): pass
+    srv = http.server.HTTPServer(("127.0.0.1", port), H)
+    print("Opening browser for %s (%s).\nIf it doesn't open, paste:\n%s\n" % (acct, EMAIL[acct], url), flush=True)
+    webbrowser.open(url); deadline = time.time() + 600
+    while "code" not in box and "error" not in box and time.time() < deadline:
+        srv.handle_request()
+    if "code" not in box: print("No code (timeout/denied:%s)." % box.get("error")); return 2
+    tok = urllib.parse.urlencode({"code": box["code"][0], "client_id": c["client_id"],
+        "client_secret": c["client_secret"], "redirect_uri": redirect, "grant_type": "authorization_code"}).encode()
+    r = json.load(urllib.request.urlopen("https://oauth2.googleapis.com/token", data=tok, timeout=30))
+    if not r.get("refresh_token"): print("No refresh_token (revoke + retry)."); return 2
+    fd = os.open(TOKEN(acct), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.write(fd, json.dumps({"client_id": c["client_id"], "client_secret": c["client_secret"],
+        "refresh_token": r["refresh_token"], "scope": r.get("scope")}).encode()); os.close(fd)
+    print("OK: calendar token saved for %s" % acct); return 0
+
+def gtoken(acct):
+    d = json.load(open(TOKEN(acct)))
+    b = urllib.parse.urlencode({"client_id": d["client_id"], "client_secret": d["client_secret"],
+        "refresh_token": d["refresh_token"], "grant_type": "refresh_token"}).encode()
+    return json.load(urllib.request.urlopen("https://oauth2.googleapis.com/token", data=b, timeout=30))["access_token"]
+
+def gapi(tok, path):
+    r = urllib.request.Request("https://www.googleapis.com/calendar/v3/" + path, headers={"Authorization": "Bearer " + tok})
+    return json.load(urllib.request.urlopen(r, timeout=60))
+
+def pull_google(acct):
+    if not os.path.exists(TOKEN(acct)):
+        print("[%s] no calendar token — run: exo-cal auth %s" % (acct, acct)); return 2
+    tok = gtoken(acct)
+    tmin = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=WINDOW_PAST_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    tmax = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=WINDOW_FUTURE_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    c = db(); total = 0
+    try:
+        cals = gapi(tok, "users/me/calendarList")["items"]
+    except urllib.error.HTTPError as e:
+        print("[%s] Calendar API HTTP %d: %s" % (acct, e.code, e.read().decode()[:200])); return 2
+    for cal in cals:
+        cid = cal["id"]; ctitle = cal.get("summary", cid)
+        page = None
+        while True:
+            q = {"timeMin": tmin, "timeMax": tmax, "singleEvents": "true", "maxResults": 2500,
+                 "showDeleted": "false"}
+            if page: q["pageToken"] = page
+            try:
+                r = gapi(tok, "calendars/%s/events?%s" % (urllib.parse.quote(cid), urllib.parse.urlencode(q)))
+            except urllib.error.HTTPError as e:
+                print("  [%s] %s: HTTP %d" % (acct, ctitle, e.code)); break
+            rows = []
+            for ev in r.get("items", []):
+                st = ev.get("start", {}); en = ev.get("end", {})
+                def ep(x):
+                    v = x.get("dateTime") or x.get("date")
+                    if not v: return None
+                    try: return datetime.datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+                    except Exception: return None
+                atts = ",".join(a.get("email", "") for a in ev.get("attendees", []) if a.get("email"))
+                rows.append({"uid": "g:%s:%s" % (acct, ev["id"]), "source": "google-" + acct,
+                    "calendar": ctitle, "title": ev.get("summary"), "start": ep(st), "end": ep(en),
+                    "all_day": 1 if st.get("date") else 0, "location": ev.get("location"),
+                    "organizer": (ev.get("organizer") or {}).get("email"), "attendees": atts,
+                    "status": ev.get("status"), "updated": time.time()})
+            upsert(c, [r for r in rows if r["start"] is not None]); total += len(rows)
+            page = r.get("nextPageToken")
+            if not page: break
+    c.commit(); c.close()
+    print("[%s] pulled %d google events" % (acct, total)); return 0
+
+def pull_apple():
+    src = os.path.expanduser("~/Library/Group Containers/group.com.apple.calendar/Calendar.sqlitedb")
+    if not os.path.exists(src): print("Apple Calendar db not found"); return 2
+    cutoff = time.time() - WINDOW_PAST_DAYS * 86400 - COCOA  # cocoa-epoch cutoff
+    ac = sqlite3.connect("file:%s?mode=ro" % src, uri=True)
+    q = """SELECT ci.ROWID, ci.summary, ci.start_date, ci.end_date, ci.all_day, ci.status,
+           ci.location_id, cal.title
+           FROM CalendarItem ci LEFT JOIN Calendar cal ON ci.calendar_id = cal.ROWID
+           WHERE ci.start_date IS NOT NULL AND ci.start_date > ?"""
+    c = db(); rows = []
+    for rid, summ, sd, ed, allday, status, locid, ctitle in ac.execute(q, [cutoff]):
+        rows.append({"uid": "a:%s" % rid, "source": "apple", "calendar": ctitle or "Apple",
+            "title": summ, "start": (sd + COCOA) if sd else None, "end": (ed + COCOA) if ed else None,
+            "all_day": allday or 0, "location": None, "organizer": None, "attendees": "",
+            "status": str(status), "updated": time.time()})
+    ac.close()
+    upsert(c, [r for r in rows if r["start"]]); c.commit(); c.close()
+    print("pulled %d apple events (window %dd back)" % (len(rows), WINDOW_PAST_DAYS)); return 0
+
+def stats():
+    if not os.path.exists(DB): print("no calendar.db yet"); return 0
+    c = db()
+    print(json.dumps({
+        "total": c.execute("SELECT COUNT(*) FROM events").fetchone()[0],
+        "by_source": dict(c.execute("SELECT source, COUNT(*) FROM events GROUP BY source").fetchall()),
+        "upcoming_7d": c.execute("SELECT COUNT(*) FROM events WHERE start BETWEEN ? AND ?",
+            [time.time(), time.time() + 7 * 86400]).fetchone()[0]}, indent=2))
+    c.close(); return 0
+
+def main():
+    a = sys.argv[1:] or ["stats"]
+    cmd = a[0]
+    if cmd == "auth" and len(a) > 1: return auth(a[1])
+    if cmd == "pull-google" and len(a) > 1: return pull_google(a[1])
+    if cmd == "pull-apple": return pull_apple()
+    if cmd == "pull-all":
+        pull_apple()
+        for acct in ("work", "personal"):
+            if os.path.exists(TOKEN(acct)): pull_google(acct)
+            else: print("[%s] skipped (no token)" % acct)
+        return 0
+    if cmd == "stats": return stats()
+    print(DOC); return 1
+
+if __name__ == "__main__":
+    sys.exit(main())

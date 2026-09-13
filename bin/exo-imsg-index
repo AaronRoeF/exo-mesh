@@ -1,0 +1,186 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+DOC = """exo-imsg-index — embed iMessage/SMS/RCS day-windows into the shared vector store.
+
+Window = (handle, calendar day). One chunk per person per day, because the unit of
+meaning in messaging is the conversation, not the message (avg msg = 27.6 chars).
+
+Writes into the SAME vectors.db as mail, with account='imessage', so `exo-mail
+semantic` searches one surface. Additive only -- never touches work/personal rows.
+Rollback: delete from chunks where account='imessage'.
+
+  exo-imsg-index [--limit N] [--since YYYY-MM-DD] [--dry-run] [--rollback]
+"""
+import json, os, re, sqlite3, sys, time, urllib.request, datetime
+import sqlite_vec
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+
+SNAP=CFG.store_path("imessage", "snapshot.db")
+VEC =CFG.store_path("vectors.db")
+MASTER=CFG.store_path("contacts-master.db")
+AUDIT=CFG.store_path("audit.jsonl")
+OLLAMA="http://localhost:11434/api/embeddings"; MODEL="nomic-embed-text"; DIM=768
+ACCT="imessage"; MAXCHARS=2000
+APPLE_EPOCH=978307200          # 2001-01-01
+
+def ts(): return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def audit(**kw):
+    kw.setdefault("at",ts())
+    with open(AUDIT,"a") as f: f.write(json.dumps(kw)+"\n")
+
+def embed(text):
+    req=urllib.request.Request(OLLAMA,data=json.dumps({"model":MODEL,"prompt":text}).encode(),
+                               headers={"Content-Type":"application/json"})
+    return json.load(urllib.request.urlopen(req,timeout=60))["embedding"]
+
+def digits(s): return re.sub(r"\D","",s or "")
+
+def name_map():
+    """handle -> display name, from the contacts master (16k people)."""
+    m={}
+    if not os.path.exists(MASTER): return m
+    c=sqlite3.connect(f"file:{MASTER}?mode=ro",uri=True)
+    for name,emails,phones in c.execute("select name,emails,phones from master where name is not null"):
+        for e in (emails or "").replace(";",",").split(","):
+            e=e.strip().lower()
+            if "@" in e: m.setdefault(e,name)
+        for p in (phones or "").replace(";",",").split(","):
+            d=digits(p)
+            if len(d)>=10: m.setdefault(d[-10:],name)
+    c.close(); return m
+
+def resolve(handle,nm):
+    if "@" in handle: return nm.get(handle.lower(),handle)
+    d=digits(handle)
+    return nm.get(d[-10:],handle) if len(d)>=10 else handle
+
+def chat_meta(snap, nm):
+    """chat_id -> (kind, key, label). Participant count is the discriminator --
+    `style` is unreliable (43 is GROUP in this database, not 1:1)."""
+    parts={}
+    for cid,hid in snap.execute("select chat_id,handle_id from chat_handle_join"):
+        parts.setdefault(cid,[]).append(hid)
+    hid2h={r[0]:r[1] for r in snap.execute("select ROWID,id from handle")}
+    meta={}
+    for cid,ident,disp in snap.execute("select ROWID,chat_identifier,coalesce(display_name,'') from chat"):
+        hs=[hid2h.get(x) for x in parts.get(cid,[]) if hid2h.get(x)]
+        if len(hs)==1:
+            meta[cid]=("1:1", hs[0], resolve(hs[0],nm))
+        else:
+            names=[resolve(h,nm) for h in hs[:3]]
+            lbl=disp or (", ".join(names)+(f" +{len(hs)-3}" if len(hs)>3 else "")) or ident
+            meta[cid]=("group", f"group:{ident}", lbl)
+    return meta
+
+def render(kind,label,day,rows,nm):
+    """rows: (text, is_from_me, service, sender_handle) in time order."""
+    svc=rows[0][2] or "iMessage"
+    head=f"[{day} · {label} · {svc}]" if kind=="1:1" else f"[{day} · GROUP {label} · {svc}]"
+    out=[head]
+    for text,me,_svc,sender in rows:
+        t=" ".join((text or "").split())
+        if not t: continue
+        if me: who="me"
+        elif kind=="group": who=resolve(sender,nm) if sender else "?"
+        else: who="them"
+        out.append(f"{who}: {t}")
+    return "\n".join(out)
+
+def main(argv):
+    limit   = int(argv[argv.index("--limit")+1]) if "--limit" in argv else None
+    since   = argv[argv.index("--since")+1] if "--since" in argv else None
+    dry     = "--dry-run" in argv
+
+    con=sqlite3.connect(VEC, timeout=60)
+    con.execute("PRAGMA busy_timeout=60000"); con.execute("PRAGMA journal_mode=WAL")
+    con.enable_load_extension(True); sqlite_vec.load(con); con.enable_load_extension(False)
+    con.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vec USING vec0(id INTEGER PRIMARY KEY, embedding float[{DIM}])")
+
+    if "--rollback" in argv:
+        ids=[r[0] for r in con.execute("select id from chunks where account=?", (ACCT,))]
+        for i in ids: con.execute("delete from chunk_vec where id=?", (i,))
+        con.execute("delete from chunks where account=?", (ACCT,)); con.commit()
+        print(f"rolled back {len(ids):,} imessage chunks"); audit(action="imsg.index.rollback", removed=len(ids)); return 0
+
+    if not os.path.exists(SNAP): print("no snapshot -- run `exo-imsg snapshot`",file=sys.stderr); return 2
+
+    have={r[0] for r in con.execute("select gid from chunks where account=?", (ACCT,))}
+    nm=name_map()
+
+    s=sqlite3.connect(f"file:{SNAP}?mode=ro",uri=True)
+    meta=chat_meta(s,nm)
+    q=f"""select cmj.chat_id,
+                 date(datetime(m.date/1000000000 + {APPLE_EPOCH},'unixepoch')) d,
+                 m.text, m.is_from_me, m.service, sh.id, m.date, m.ROWID
+          from message m
+          join chat_message_join cmj on cmj.message_id=m.ROWID
+          left join handle sh on sh.ROWID=m.handle_id
+          where m.associated_message_type=0 and coalesce(m.text,'')<>'' """
+    if since: q+=f" and date(datetime(m.date/1000000000 + {APPLE_EPOCH},'unixepoch')) >= '{since}' "
+    q+=" order by m.date, m.ROWID"
+
+    win={}; seen=set()
+    for cid,d,text,me,svc,sender,raw,mrow in s.execute(q):
+        if mrow in seen: continue          # 20 msgs live in 2 chats
+        seen.add(mrow)
+        mk=meta.get(cid)
+        if not mk: continue
+        kind,key,label=mk
+        win.setdefault((key,d),[]).append((text,me,svc,sender))
+    s.close()
+    lab={}
+    for cid,(kind,key,label) in meta.items(): lab[key]=(kind,label)
+
+    # windows younger than 48h may still gain messages -> always re-embed
+    fresh=(datetime.date.today()-datetime.timedelta(days=2)).isoformat()
+    todo=[]
+    for (key,d),rows in win.items():
+        kind,label=lab.get(key,("1:1",key))
+        gid=(f"imsgrp:{key[6:]}:{d}" if kind=="group" else f"imsg:{key}:{d}")
+        if gid in have and d < fresh: continue
+        todo.append((gid,key,d,rows,kind,label))
+    todo.sort(key=lambda x:x[2])
+    if limit: todo=todo[:limit]
+
+    print(f"  windows total {len(win):,} · already embedded {len(have):,} · to embed {len(todo):,}")
+    if dry:
+        for gid,key,d,rows,kind,label in todo[:4]:
+            print(f"\n--- {gid}  [{kind}] {label}\n{render(kind,label,d,rows,nm)[:420]}")
+        return 0
+
+    t0=time.time(); n=0; chunks=0
+    for gid,key,d,rows,kind,label in todo:
+        txt=render(kind,label,d,rows,nm)
+        subj=(f"Group {label} — {d}" if kind=="group" else f"Conversation with {label} — {d}")
+        if gid in have:                                   # refresh a fresh window
+            for (i,) in list(con.execute("select id from chunks where gid=? and account=?", (gid,ACCT))):
+                con.execute("delete from chunk_vec where id=?", (i,))
+            con.execute("delete from chunks where gid=? and account=?", (gid,ACCT))
+        parts=[txt[i:i+MAXCHARS] for i in range(0,len(txt),MAXCHARS)] or [txt]
+        epoch=int(time.mktime(time.strptime(d,"%Y-%m-%d")))
+        for ci,part in enumerate(parts):
+            try: emb=embed(part)
+            except Exception as e:
+                con.commit(); print(f"embed fail (is ollama running?): {e}",file=sys.stderr)
+                audit(action="imsg.index.error",error=str(e)[:200],embedded=chunks); return 6
+            cur=con.cursor()
+            cur.execute("INSERT INTO chunks(gid,thread,account,chunk_idx,text,date,from_addr,subject) VALUES(?,?,?,?,?,?,?,?)",
+                        (gid,"",ACCT,ci,part,epoch,key[:120],subj[:200]))
+            cur.execute("INSERT INTO chunk_vec(id,embedding) VALUES(?,?)",(cur.lastrowid,json.dumps(emb)))
+            chunks+=1
+        n+=1
+        if n%500==0:
+            con.commit(); el=time.time()-t0
+            print(f"  {n:,}/{len(todo):,} windows · {chunks:,} chunks · {el:.0f}s · {n/max(el,1):.0f}/s",flush=True)
+    con.commit()
+    secs=round(time.time()-t0,1)
+    mb=round(os.path.getsize(VEC)/1048576,1)
+    print(f"  done: {n:,} windows -> {chunks:,} chunks in {secs}s · vectors.db {mb} MB")
+    audit(action="imsg.index",windows=n,chunks=chunks,secs=secs,vectors_mb=mb)
+    return 0
+
+if __name__=="__main__":
+    a=sys.argv[1:]
+    if a and a[0] in ("-h","--help"): print(DOC); sys.exit(0)
+    sys.exit(main(a))

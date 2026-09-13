@@ -1,0 +1,40 @@
+#!/bin/sh
+# exo-mail-python — resolve the Python interpreter every exo-mail tool runs under.
+#
+# The tools carry a two-line sh/Python polyglot header instead of an absolute
+# shebang, so the tree can be cloned anywhere:
+#
+#   #!/bin/sh
+#   ''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+#
+# First hit wins:
+#   1. $EXO_MAIL_PYTHON              explicit override
+#   2. <bin>/../venv/bin/python      the venv beside this checkout (or beside the
+#                                    install dir, when bin/ is a symlink into a repo)
+#   3. $EXO_MAIL_HOME/venv/bin/python  the installed venv (default ~/.local/share/exo-mail),
+#                                    which is what lets the tools run from a second
+#                                    checkout that has no venv of its own
+#   4. python3 on PATH               last resort; deps will be missing, so the tool
+#                                    fails loudly with an ImportError rather than silently
+#
+# No `dirname` call: ${0%/*} is a POSIX parameter expansion, so this cannot break
+# under a stripped scheduler PATH.
+set -u
+
+D="${0%/*}"
+[ "$D" = "$0" ] && D="."
+
+try() { [ -n "${1:-}" ] && [ -x "$1" ] && EXO_PY="$1" && return 0; return 1; }
+
+EXO_PY=""
+try "${EXO_MAIL_PYTHON:-}" \
+  || try "$D/../venv/bin/python" \
+  || try "${EXO_MAIL_HOME:-$HOME/.local/share/exo-mail}/venv/bin/python" \
+  || EXO_PY="$(command -v python3 || true)"
+
+if [ -z "$EXO_PY" ]; then
+  echo "exo-mail: no Python interpreter found (tried \$EXO_MAIL_PYTHON, $D/../venv, \$EXO_MAIL_HOME/venv, python3)" >&2
+  exit 127
+fi
+
+exec "$EXO_PY" "$@"

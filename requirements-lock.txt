@@ -1,0 +1,37 @@
+# Full pinned environment, captured with `pip freeze` from a working install.
+# Use this for an exact rebuild; requirements.txt for a normal one.
+
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.1
+cryptography==50.0.1
+email-reply-parser==0.5.12
+google-api-core==2.36.0
+google-api-python-client==2.200.0
+google-auth==2.57.1
+google-auth-httplib2==0.4.2
+google-auth-oauthlib==1.4.1
+googleapis-common-protos==1.75.3
+httplib2==0.32.0
+idna==3.19
+lieer==1.6
+mail-parser==4.6.4
+mlx==0.32.1
+notmuch2==0.40
+oauthlib==3.3.1
+opentelemetry-api==1.44.0
+proto-plus==1.28.4
+protobuf==7.36.1
+pyasn1==0.6.4
+pyasn1_modules==0.4.2
+pycparser==3.0
+pyparsing==3.3.2
+PyYAML==6.0.3
+requests==2.34.2
+requests-oauthlib==2.0.0
+sqlite-vec==0.1.9
+tqdm==4.70.0
+typing_extensions==4.16.0
+uritemplate==4.2.0
+urllib3==2.7.0
+wheel==0.47.0

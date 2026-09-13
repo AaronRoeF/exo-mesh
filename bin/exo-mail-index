@@ -1,0 +1,89 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+"""exo-mail-index — build/refresh the semantic vector store from the notmuch replica.
+Local-only embeddings via Ollama (nomic-embed-text, 768d). One sqlite-vec file,
+both accounts, account column. Chunk -> strip quotes/sig -> embed -> upsert."""
+import sys,os,json,sqlite3,subprocess,urllib.request,time,argparse,re
+import sqlite_vec
+from email import policy
+from email.parser import BytesParser
+try: from email_reply_parser import EmailReplyParser
+except Exception: EmailReplyParser=None
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+NOTMUCH=CFG.notmuch_bin(); DB=CFG.store_path("vectors.db")
+OLLAMA="http://localhost:11434/api/embeddings"; MODEL="nomic-embed-text"; DIM=768
+def embed(text):
+    req=urllib.request.Request(OLLAMA,data=json.dumps({"model":MODEL,"prompt":text}).encode(),headers={"Content-Type":"application/json"})
+    return json.load(urllib.request.urlopen(req,timeout=60))["embedding"]
+def db_init():
+    con=sqlite3.connect(DB, timeout=60); con.execute("PRAGMA busy_timeout=60000"); con.execute("PRAGMA journal_mode=WAL"); con.enable_load_extension(True); sqlite_vec.load(con); con.enable_load_extension(False)
+    con.execute("CREATE TABLE IF NOT EXISTS chunks(id INTEGER PRIMARY KEY, gid TEXT, thread TEXT, account TEXT, chunk_idx INT, text TEXT, date INT, from_addr TEXT, subject TEXT)")
+    con.execute("CREATE INDEX IF NOT EXISTS chunks_gid ON chunks(gid)")
+    con.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vec USING vec0(id INTEGER PRIMARY KEY, embedding float[{DIM}])")
+    return con
+def body_text(fp):
+    try:
+        with open(fp,'rb') as f: msg=BytesParser(policy=policy.default).parse(f)
+    except Exception: return ""
+    try:
+        part=msg.get_body(preferencelist=('plain','html'))
+    except Exception: part=None
+    if not part: return ""
+    try:
+        txt=part.get_content()
+    except Exception:
+        try: txt=(part.get_payload(decode=True) or b'').decode('utf-8','replace')
+        except Exception: return ""
+    if not isinstance(txt,str): return ""
+    if part.get_content_type()=='text/html':
+        txt=re.sub(r'<[^>]+>',' ',txt)
+    if EmailReplyParser:
+        try: txt=EmailReplyParser.parse_reply(txt) or txt
+        except Exception: pass
+    txt=re.sub(r'\n>.*','',txt); txt=re.sub(r'[ \t]+',' ',txt); txt=re.sub(r'\n{3,}','\n\n',txt)
+    return txt.strip()
+def chunks(t,size=1800,overlap=200):
+    if len(t)<=size: return [t] if t else []
+    out=[]; i=0
+    while i<len(t): out.append(t[i:i+size]); i+=size-overlap
+    return out
+def main():
+    ap=argparse.ArgumentParser(); ap.add_argument("--query",default="*"); ap.add_argument("--limit",type=int,default=0); ap.add_argument("--reset",action="store_true")
+    a=ap.parse_args()
+    os.makedirs(os.path.dirname(DB),exist_ok=True)
+    if a.reset and os.path.exists(DB): os.remove(DB)
+    con=db_init(); have=set(r[0] for r in con.execute("SELECT DISTINCT gid FROM chunks"))
+    files=subprocess.run([NOTMUCH,"search","--output=files",a.query],capture_output=True,text=True).stdout.splitlines()
+    if a.limit: files=files[:a.limit]
+    from email.parser import BytesHeaderParser; H=BytesHeaderParser()
+    n_msg=n_chunk=skip=0; t0=time.time()
+    for fp in files:
+        gid=fp.split('/')[-1].split(':2,')[0]
+        if gid in have: skip+=1; continue
+        acct='work' if '/work/' in fp else 'personal'
+        try:
+            with open(fp,'rb') as f: h=H.parse(f)
+        except Exception: continue
+        frm=str(h.get('From') or ''); subj=str(h.get('Subject') or '')
+        try:
+            from email.utils import parsedate_to_datetime
+            date=int(parsedate_to_datetime(h.get('Date')).timestamp()) if h.get('Date') else 0
+        except Exception: date=0
+        body=body_text(fp)
+        text=(subj+"\n"+body).strip()
+        if not text: continue
+        cur=con.cursor()
+        for ci,ch in enumerate(chunks(text)):
+            try: emb=embed(ch)
+            except Exception as e:
+                print("embed fail (is ollama running?):",e); con.commit(); sys.exit(6)
+            cur.execute("INSERT INTO chunks(gid,thread,account,chunk_idx,text,date,from_addr,subject) VALUES(?,?,?,?,?,?,?,?)",(gid,'',acct,ci,ch[:2000],0,frm[:120],subj[:200]))
+            rid=cur.lastrowid
+            cur.execute("INSERT INTO chunk_vec(id,embedding) VALUES(?,?)",(rid,json.dumps(emb)))
+            n_chunk+=1
+        n_msg+=1
+        if n_msg%200==0: con.commit(); print(f"  {n_msg} msgs / {n_chunk} chunks / {time.time()-t0:.0f}s")
+    con.commit()
+    print(f"DONE indexed {n_msg} msgs, {n_chunk} chunks (skipped {skip} already) in {time.time()-t0:.0f}s; db={os.path.getsize(DB)/2**20:.0f}MB")
+if __name__=="__main__": main()

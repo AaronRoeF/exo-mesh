@@ -1,0 +1,481 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+"""exo-mail-archdoc — generate the canonical exo-mail architecture section
+from the live tool surface: bin/* module docstrings, `exo-mail --help`,
+and the store's *.db on disk. Deterministic + idempotent -- same tool
+surface in, same file out, byte for byte (only the snapshot date line
+changes across calendar days).
+
+  exo-mail-archdoc             regenerate the canonical doc in place
+  exo-mail-archdoc --print     print the generated doc to stdout only
+  exo-mail-archdoc --check     regenerate in memory, diff vs the file on
+                                disk, exit 1 if they differ (no write)
+  exo-mail-archdoc --out PATH  write to PATH instead of the canonical
+                                path (testing)
+
+This tool only READS bin/* and the store's *.db and WRITES the one doc
+below -- it never edits another exo-mail tool's logic. The caller
+(exo-mail-sync.sh) treats a nonzero exit here as log-and-continue, never
+a sync failure.
+"""
+import os, sys, re, ast, glob, socket, subprocess, datetime, textwrap
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+
+BIN_DIR = os.path.dirname(os.path.abspath(__file__))
+STORE_DIR = CFG.store()
+DEFAULT_OUT = CFG.archdoc_out()
+SELF = os.path.basename(__file__)
+
+# ---------------------------------------------------------------------
+# Group classification. First predicate that matches wins. Kept here in
+# code (not hand-typed into the doc) so re-grouping a tool is a one-line
+# change to THIS file, never a hand-edit of the generated markdown.
+# ---------------------------------------------------------------------
+GROUP_RULES = [
+    (lambda n: n in ("exo-mail-sync.sh", "exo-gmi"), "replica/sync"),
+    (lambda n: n in ("exo-mail", SELF), "CLI"),
+    (lambda n: n == "exo-mail-index", "semantic"),
+    (lambda n: "contacts" in n or "mesh" in n, "contacts/mesh"),
+    (lambda n: n in ("exo-cal", "exo-day"), "calendar"),
+    (lambda n: ("label" in n or "filter" in n
+                or n in ("exo-mail-classify", "exo-mail-needsreply")),
+     "labels/filters"),
+]
+GROUP_ORDER = ["replica/sync", "CLI", "semantic", "contacts/mesh",
+               "calendar", "labels/filters", "other"]
+
+SHORT_LABEL = {
+    "exo-gmi": "pull", "exo-mail-index": "index",
+    "exo-mail-classify": "classify", "exo-cal": "calendar",
+    "exo-mail-needsreply": "needsreply", "exo-mail-contacts": "mesh",
+    "exo-mail": "storage-check", "exo-mail-archdoc": "archdoc",
+}
+
+STORE_WRITERS = {
+    "calendar.db": "exo-cal",
+    "contacts.db": "exo-mail-contacts",
+    "contacts-master.db": "exo-mail-contacts-merge",
+    "vectors.db": "exo-mail-index",
+    "mesh.db": "exo-mesh-resolve",
+}
+
+
+def classify(name):
+    for pred, group in GROUP_RULES:
+        if pred(name):
+            return group
+    return "other"
+
+
+SENTENCE_RE = re.compile(r'^(.*?\.)(?:\s|$)', re.S)
+
+
+def module_doc(src):
+    """The prose header of a tool, tolerant of two things ast.get_docstring
+    is not. (1) The sh/Python polyglot shebang: its second line is a string
+    literal, so it becomes the module's nominal docstring and displaces the
+    real one -- skip any leading string that names the interpreter shim.
+    (2) Tools that keep their help text in a module-level `DOC = \"\"\"...\"\"\"`
+    constant (the ones that print it as their --help). Returns '' for a tool
+    that has neither."""
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return ""
+    for node in tree.body:
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "DOC"
+                        for t in node.targets)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            return node.value.value
+        if (isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            s = node.value.value
+            if "exo-mail-python" in s:
+                continue          # the polyglot header, not documentation
+            return s
+    return ""
+
+
+def first_sentence(text):
+    """PEP257-ish summary: flatten to one line, take the first sentence
+    (up to the first '. ' boundary), fall back to a hard truncate."""
+    flat = re.sub(r'\s+', ' ', " ".join(
+        l.strip() for l in text.splitlines() if l.strip())).strip()
+    if not flat:
+        return ""
+    m = SENTENCE_RE.match(flat)
+    return (m.group(1) if m else flat[:140]).strip()
+
+
+def purpose_of(path):
+    """One-line purpose for an executable. Python: PEP257 module
+    docstring via ast (first sentence). Non-python (e.g. bash): the
+    comment block immediately after the shebang (first sentence of
+    it). Returns '' if neither yields anything."""
+    try:
+        src = open(path, encoding="utf-8", errors="ignore").read()
+    except OSError:
+        return ""
+    doc = module_doc(src)
+    if doc:
+        return first_sentence(doc)
+    lines = src.splitlines()
+    if lines and lines[0].startswith("#!"):
+        lines = lines[1:]
+    comment = []
+    for line in lines:
+        s = line.strip()
+        if s.startswith("#"):
+            comment.append(s.lstrip("#").strip())
+        elif not s:
+            if comment:
+                break
+        else:
+            break
+    return first_sentence(" ".join(comment)) if comment else ""
+
+
+def tool_inventory():
+    tools = []
+    for path in sorted(glob.glob(os.path.join(BIN_DIR, "*"))):
+        name = os.path.basename(path)
+        if not os.path.isfile(path) or not os.access(path, os.X_OK):
+            continue
+        purpose = purpose_of(path) or "[INFERENCE] no module docstring found"
+        tools.append((name, classify(name), purpose))
+    return tools
+
+
+def cli_subcommands():
+    exo_mail = os.path.join(BIN_DIR, "exo-mail")
+    try:
+        out = subprocess.run([exo_mail, "--help"], capture_output=True,
+                              text=True, timeout=15).stdout
+    except Exception as e:
+        return None, "`exo-mail --help` failed: %s" % e
+    m = re.search(r'\{([a-zA-Z0-9_,\-]+)\}', out)
+    if not m:
+        return None, "could not parse a subcommand list from --help output"
+    return m.group(1).split(","), None
+
+
+def store_role(db_name):
+    writer = STORE_WRITERS.get(db_name)
+    if not writer:
+        return ("[INFERENCE] no known writer mapped in this generator "
+                "for %s -- role unverified" % db_name)
+    path = os.path.join(BIN_DIR, writer)
+    if not os.path.exists(path):
+        return "[INFERENCE] writer `%s` not found on disk" % writer
+    doc = module_doc(open(path, encoding="utf-8", errors="ignore").read())
+    flat = re.sub(r'\s+', ' ', doc)
+    m = re.search(r'(Store|Writes)\s*:[^.]*?' + re.escape(db_name)
+                  + r'[^.]*\.', flat)
+    if m:
+        return "written by `%s` -- %s" % (writer, m.group(0).strip())
+    return "[INFERENCE] written by `%s` (%s)" % (
+        writer, first_sentence(doc) or "no docstring")
+
+
+def data_stores():
+    stores = []
+    for path in sorted(glob.glob(os.path.join(STORE_DIR, "*.db"))):
+        name = os.path.basename(path)
+        size_mb = os.path.getsize(path) / (1024 * 1024)
+        stores.append((name, size_mb, store_role(name)))
+    return stores
+
+
+def pipeline_steps():
+    """Ordered pipeline steps, parsed from exo-mail-sync.sh itself --
+    never hand-typed. Each step's one-line gloss reuses purpose_of() on
+    the invoked tool, so the pipeline description and the tool
+    inventory description can never disagree with each other."""
+    path = os.path.join(BIN_DIR, "exo-mail-sync.sh")
+    try:
+        raw = open(path, encoding="utf-8").read()
+    except OSError:
+        return [("[INFERENCE] exo-mail-sync.sh not found on disk", None)]
+    steps = []
+    seen = set()
+    for line in raw.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if re.fullmatch(r'\w+="[^"]*";?', s):
+            continue  # pure variable assignment, not an invocation
+        m = re.match(r"run\s+(\w+)\s+'([^']*)'", s)
+        if m:
+            acct, query = m.groups()
+            steps.append(("pull **%s** mail via `exo-gmi` (lieer) -- "
+                          "query: `%s`" % (acct, query), "pull:%s" % acct))
+            continue
+        if re.match(r'^notmuch new\b', s):
+            steps.append(("`notmuch new` -- import pulled mail into "
+                          "the notmuch index", "notmuch-new"))
+            continue
+        m = re.search(r'bin/(exo-[\w.-]+)"', s)
+        if not m:
+            continue
+        tool = m.group(1)
+        if tool in seen or tool == "exo-mail-sync.sh":
+            continue
+        seen.add(tool)
+        tool_path = os.path.join(BIN_DIR, tool)
+        gloss = (purpose_of(tool_path) if os.path.exists(tool_path)
+                  else "[INFERENCE] tool not found on disk")
+        extra = ""
+        if tool == "exo-cal":
+            am = re.search(r'exo-cal"\s+([\w-]+)', s)
+            if am:
+                extra += " (subcommand: `%s`)" % am.group(1)
+        if tool == "exo-mail-classify" and "EXO_LABEL_PUSH" in s:
+            extra += " [EXO_LABEL_PUSH=1: push new buckets as Gmail labels]"
+        if tool == "exo-mail-contacts":
+            gate = re.search(r'-gt\s+(\d+)\s*\]', raw)
+            if gate:
+                secs = int(gate.group(1))
+                hrs = secs / 3600
+                hrs_s = "%d" % hrs if hrs == int(hrs) else "%.1f" % hrs
+                extra += " [gated: skipped if contacts.db is <%sh old]" % hrs_s
+        if tool == "exo-mail":
+            extra += (" (conditional -- only runs once the storage "
+                       "soft-cap is exceeded)")
+        steps.append(("`%s`%s -- %s" % (tool, extra, gloss),
+                      SHORT_LABEL.get(tool, tool)))
+    return steps
+
+
+def ascii_pipeline(steps):
+    shorts = [short for _, short in steps if short]
+    if not shorts:
+        return "(no steps parsed)"
+    chain = " -> ".join(shorts)
+    return "\n".join(textwrap.wrap(chain, width=64,
+                                    break_long_words=False,
+                                    subsequent_indent=""))
+
+
+def wrap(text, width=76):
+    return "\n".join(textwrap.wrap(text, width=width))
+
+
+def bullet(text, width=76):
+    return textwrap.fill("- " + text, width=width, subsequent_indent="  ")
+
+
+def build_doc():
+    now = datetime.datetime.now().strftime("%Y-%m-%d")
+    host = socket.gethostname().split(".")[0]
+    tools = tool_inventory()
+    subs, subs_err = cli_subcommands()
+    stores = data_stores()
+    steps = pipeline_steps()
+
+    lines = []
+    a = lines.append
+    a("<!-- AUTO-GENERATED by exo-mail-archdoc -- do not hand-edit. -->")
+    a("<!-- Edit a tool's docstring, exo-mail's argparse subcommands, or")
+    a("     exo-mail-sync.sh; this file regenerates on the next")
+    a("     exo-mail-sync.sh run (or `exo-mail-archdoc` on demand). -->")
+    a("")
+    a("# exo-mesh -- local-first mesh over mail, contacts, calendar, and todos")
+    a("")
+    a(wrap(
+        "Generated architecture section. "
+        "Snapshot: %s, host %s. Every fact below is re-derived from "
+        "disk on each run -- tool docstrings, `exo-mail --help`, and "
+        "the store's `*.db` -- so this file cannot drift from the "
+        "running tool surface the way a hand-written section can. "
+        "Re-run `exo-mail-archdoc --check` to verify this copy still "
+        "matches reality." % (now, host)))
+    a("")
+    a("## Why")
+    a("")
+    a(wrap(
+        "exo-mail is a local-first replica of your Gmail "
+        "accounts, indexed with notmuch, embedded for "
+        "semantic search, with a relationship mesh over every "
+        "correspondent -- plus exo-cal (calendar) and exo-day (unified "
+        "day view) built on the same pattern. It exists so agent "
+        "skills read mail/calendar state in single-digit milliseconds, "
+        "offline, never rate-limited, instead of going through the "
+        "Gmail/Calendar MCP connectors on every call. This particular "
+        "doc is generated rather than hand-written because a tool "
+        "surface this size (%d executables, a %s-subcommand CLI, %d "
+        "on-disk stores) drifts from any hand-maintained description "
+        "within a few sessions; generating it from the live tools is "
+        "the only way the architecture docs can promise it is still "
+        "accurate." % (len(tools), (len(subs) if subs else "?"),
+                       len(stores))))
+    a("")
+    a("## Relationship mesh & BEDROCK")
+    a("")
+    a(wrap(
+        "`exo-mesh-resolve` unifies every correspondent across email, "
+        "iMessage, and calendar into one canonical person in `mesh.db` "
+        "(table `identity`): a cross-channel record with sent/received "
+        "counts, first/last contact per channel, a unified `last_contact`, "
+        "and the relationship span in years. This is the substrate the "
+        "relationship features read. Cross-channel drift (`contact drift`, "
+        "the daily brief) reports who has gone quiet across ALL channels "
+        "rather than email alone. BEDROCK (`exo-mail bedrock candidates`) "
+        "surfaces enduring relationships -- those that have outlived the "
+        "context that created them: span >= 7 years, two-way in at least "
+        "one channel, still alive within 18 months. Criteria 1-3 are "
+        "computed here; criterion 4 (\"survived a context change\") is "
+        "a human call, after which `bedrock: true` is written to the "
+        "person file. A mesh-suppress list (`mesh-suppress.tsv` in the "
+        "store) keeps departed or sensitive contacts off the proactive "
+        "surfaces without deleting the relationship."))
+    a("")
+    a("## Components")
+    a("")
+    a("### Tool inventory -- %d executables in `bin/`" % len(tools))
+    a("")
+    by_group = {g: [] for g in GROUP_ORDER}
+    for name, group, purpose in tools:
+        by_group[group].append((name, purpose))
+    for group in GROUP_ORDER:
+        entries = by_group[group]
+        if not entries:
+            continue
+        a("**%s**" % group)
+        a("")
+        a("| Tool | Purpose |")
+        a("|---|---|")
+        for name, purpose in entries:
+            a("| `%s` | %s |" % (name, purpose.replace("|", "\\|")))
+        a("")
+
+    a("### CLI surface -- `exo-mail --help`")
+    a("")
+    if subs:
+        a("%d subcommands, parsed from the live `--help` output: %s."
+          % (len(subs), ", ".join("`%s`" % s for s in subs)))
+    else:
+        a("[INFERENCE] %s" % subs_err)
+    a("")
+
+    a("### Data stores -- the store's `*.db`")
+    a("")
+    a("| Store | Size | Role |")
+    a("|---|---|---|")
+    for name, size_mb, role in stores:
+        a("| `%s` | %.0f MB | %s |" % (name, size_mb,
+                                        role.replace("|", "\\|")))
+    a("")
+    a("The underlying mail replica itself -- the notmuch Maildir + "
+      "index that every store above is derived from -- lives outside "
+      "this glob, one directory per account under the mail root, "
+      "alongside `.notmuch` (notmuch `database.path`).")
+    a("")
+
+    a("### Pipeline -- `exo-mail-sync.sh`, in on-disk order")
+    a("")
+    a("```")
+    a(ascii_pipeline(steps))
+    a("```")
+    a("")
+    for i, (desc, _short) in enumerate(steps, 1):
+        a("%d. %s" % (i, desc))
+    a("")
+
+    a("## Evidence artifacts -- what proves this doc is alive")
+    a("")
+    a("| Signal | This snapshot |")
+    a("|---|---|")
+    a("| Executables inventoried | %d |" % len(tools))
+    a("| CLI subcommands parsed | %s |" % (len(subs) if subs else "0 (parse failed)"))
+    a("| `.db` stores enumerated | %d |" % len(stores))
+    a("| Pipeline steps parsed from exo-mail-sync.sh | %d |" % len(steps))
+    a("")
+    a("derived: `exo-mail-archdoc --check` -- regenerates in memory "
+      "and diffs against this file; exit 0 means the two agree.")
+    a("")
+
+    a("## Failure modes")
+    a("")
+    a(bullet(
+        "**No failure history yet.** This section (and the generator "
+        "behind it) did not exist before 2026-09-11; there is nothing "
+        "to have failed. The one drift risk worth naming: this "
+        "generator only reads `bin/*` and the store's `*.db` on the "
+        "machine it runs on -- if a tool is ever renamed, "
+        "added, or moved off that path without a sync running "
+        "afterward, this file will lag until the next "
+        "`exo-mail-sync.sh` fires (or `exo-mail-archdoc` is run by "
+        "hand)."))
+    a(bullet(
+        "**Group and store-writer mappings are a short lookup table "
+        "in the generator, not derived.** `GROUP_RULES` and "
+        "`STORE_WRITERS` at the top of `exo-mail-archdoc` are "
+        "hand-maintained -- a new tool that doesn't match any rule "
+        "lands in `other`, and a new `.db` file with no writer mapped "
+        "shows as `[INFERENCE] ... role unverified` rather than "
+        "silently guessing."))
+    a("")
+
+    a("## Governing decisions")
+    a("")
+    a("| Decision | What it binds here |")
+    a("|---|---|")
+    a("| (none yet) | No ADR currently backs this doc or its generator. "
+      "Written directly against the instruction that the exo-mail "
+      "architecture section must generate FROM the tool surface so it "
+      "cannot drift from reality, matching the rules-INDEX "
+      "generated-artifact convention. |")
+    a("")
+    a("")
+    return "\n".join(lines) + "\n"
+
+
+def main(argv):
+    out_path = DEFAULT_OUT
+    mode = "write"
+    args = argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i] == "--print":
+            mode = "print"
+        elif args[i] == "--check":
+            mode = "check"
+        elif args[i] == "--out":
+            i += 1
+            out_path = args[i]
+        else:
+            sys.stderr.write("exo-mail-archdoc: unknown arg %r\n" % args[i])
+            return 1
+        i += 1
+
+    doc = build_doc()
+
+    if mode == "print":
+        sys.stdout.write(doc)
+        return 0
+    if mode == "check":
+        try:
+            existing = open(out_path, encoding="utf-8").read()
+        except OSError:
+            existing = None
+        if existing == doc:
+            print("exo-mail-archdoc: up to date (%s)" % out_path)
+            return 0
+        print("exo-mail-archdoc: DRIFT -- %s does not match the live "
+              "tool surface; run `exo-mail-archdoc` to regenerate."
+              % out_path)
+        return 1
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(doc)
+    print("exo-mail-archdoc: wrote %s (%d bytes)" % (out_path, len(doc)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

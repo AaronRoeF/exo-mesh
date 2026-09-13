@@ -1,0 +1,85 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+"""exo-day — the unified day surface (P7). One read across the local stores:
+calendar (calendar.db) + todos (Things SQLite) + mail (exo-mail brief) + journal
+(a dated markdown note). Read-only; composes, never writes. `--json` for agents.
+"""
+import os, sys, json, sqlite3, glob, subprocess, time, datetime
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+
+CAL = CFG.store_path("calendar.db")
+EXO_MAIL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "exo-mail")
+JSON = "--json" in sys.argv
+
+def cal_events():
+    if not os.path.exists(CAL): return [], 0
+    c = sqlite3.connect("file:%s?mode=ro" % CAL, uri=True)
+    now = time.time(); eod = time.mktime(datetime.date.today().timetuple()) + 86400
+    today = [{"start": s, "title": t, "calendar": cal, "all_day": ad}
+             for s, t, cal, ad in c.execute(
+                 'SELECT start,title,calendar,all_day FROM events WHERE start>=? AND start<? AND title IS NOT NULL '
+                 'AND (status IS NULL OR status!="cancelled") ORDER BY start', [now - 3600, eod])]
+    week = c.execute("SELECT COUNT(*) FROM events WHERE start>=? AND start<?", [now, now + 7 * 86400]).fetchone()[0]
+    c.close(); return today, week
+
+def things_counts():
+    g = glob.glob(os.path.expanduser("~/Library/Group Containers/*/ThingsData-*/Things Database.thingsdatabase/main.sqlite"))
+    if not g: return None
+    c = sqlite3.connect("file:%s?mode=ro" % g[0], uri=True)
+    def n(where):
+        try: return c.execute("SELECT COUNT(*) FROM TMTask WHERE type=0 AND status=0 AND trashed=0 AND " + where).fetchone()[0]
+        except Exception: return None
+    out = {"today": n("start=1"), "inbox": n("start=0 AND project IS NULL AND area IS NULL")}
+    c.close(); return out
+
+def mail_brief():
+    try:
+        r = subprocess.run([EXO_MAIL, "brief", "--account", "all", "--json"], capture_output=True, text=True, timeout=30)
+        d = json.loads(r.stdout)["data"]
+        return {"needs_reply": d["at_a_glance"]["needs_reply"], "vip_unread": d["at_a_glance"]["vip_unread"],
+                "inbox": d["at_a_glance"]["inbox"], "drifting": len(d.get("drifting", []))}
+    except Exception:
+        return None
+
+def journal_today():
+    today = datetime.date.today().isoformat()
+    # EXO_MAIL_NOTES = a markdown notes dir; a file named YYYY-MM-DD.md anywhere
+    # under it counts as today's journal entry. Unset = the line reports "no note".
+    vaults = [v for v in (CFG.notes_dir(),) if v]
+    for v in vaults:
+        hits = glob.glob(os.path.join(v, "**", today + ".md"), recursive=True)
+        if hits: return True
+    return False
+
+def main():
+    today, week = cal_events()
+    things = things_counts()
+    mail = mail_brief()
+    journ = journal_today()
+    data = {"date": datetime.date.today().isoformat(),
+            "meetings_today": [{"time": datetime.datetime.fromtimestamp(e["start"]).strftime("%H:%M") if not e["all_day"] else "all-day",
+                                "title": e["title"], "calendar": e["calendar"]} for e in today],
+            "meetings_next_7d": week, "todos": things, "mail": mail, "journal_note_exists": journ}
+    if JSON:
+        print(json.dumps(data, indent=2)); return 0
+    d = datetime.date.today().strftime("%A %B %-d")
+    print("━━ %s ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" % d)
+    print("\nMEETINGS TODAY (%d) · %d in the next 7 days" % (len(today), week))
+    for e in data["meetings_today"]:
+        print("  %-7s %s%s" % (e["time"], e["title"][:52], "  ·%s" % e["calendar"] if e["calendar"] else ""))
+    if not today: print("  (nothing on the calendar today)")
+    if things:
+        print("\nTODOS   today %s · inbox %s" % (things["today"], things["inbox"]))
+    if mail:
+        print("MAIL    %s need reply · %s vip unread · %s drifting · inbox %s"
+              % (mail["needs_reply"], mail["vip_unread"], mail["drifting"], mail["inbox"]))
+    print("JOURNAL %s" % ("today's note exists" if journ else "no note yet — start one"))
+    _tok = any(os.path.exists(os.path.join(CFG.config_dir(), "gcal-%s.token.json" % a))
+               for a in CFG.accounts())
+    src = "apple" + (" + google" if _tok else " (google pending auth)")
+    print("\ncalendar source: %s" % src)
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

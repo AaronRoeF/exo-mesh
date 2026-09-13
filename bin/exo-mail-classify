@@ -1,0 +1,249 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+"""exo-mail-classify — tag not-yet-classified mail across every account.
+Sender rules (sender-rules.tsv in the store, plus a legacy keep-senders.txt
+folded in as exo/fins allow rules) are checked BEFORE the header heuristics:
+an allow rule forces the bucket, a deny rule forbids it. Falls through to the
+heuristics: financial(keep-senders allow-rules)->exo/fins, newsletter(bulk +
+non-correspondent + not-thread-participated)->exo/feed.
+
+Idempotent via the exo/classified marker (both local tag and the candidate
+query). After local tagging, pushes each newly-classified message's CURRENT
+exo/* bucket tags up as Gmail labels via batchModify, per account — this is
+also how a bucket that's been local-only until now (e.g. exo/needs-reply,
+exo/reply-later, set by other tools) gets its Gmail label backfilled the
+first time classify sweeps that message.
+
+EXO_DRY=1 prints intended notmuch/API calls without executing them.
+EXO_LIMIT=N caps the candidate set (testing/dry-run sampling only).
+"""
+import os, re, sys, json, subprocess, sqlite3, urllib.request, urllib.parse
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+from email.parser import BytesHeaderParser
+
+NOTMUCH = CFG.notmuch_bin()
+CDB = CFG.store_path("contacts.db")
+RULES_TSV = CFG.store_path("sender-rules.tsv")
+KEEP_SENDERS = os.path.join(CFG.home(), "keep-senders.txt")
+BUCKETS = ("vip", "feed", "fins", "updates", "paper-trail", "needs-reply", "reply-later")
+SELF = tuple(sorted(CFG.self_emails()))
+DRY = bool(os.environ.get("EXO_DRY"))
+LIMIT = int(os.environ.get("EXO_LIMIT", "0") or 0)
+
+
+def nm(*a):
+    return subprocess.run([NOTMUCH, *a], capture_output=True, text=True).stdout
+
+
+# ---- sender rules: allow forces a bucket, deny forbids one — checked BEFORE heuristics ----
+def load_rules():
+    rules = []  # list of (pattern_lower, bucket, action)
+    if os.path.exists(RULES_TSV):
+        for line in open(RULES_TSV):
+            line = line.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            p = line.split("\t")
+            if len(p) < 3:
+                continue
+            sender, bucket, action = p[0].strip().lower(), p[1].strip(), p[2].strip()
+            if bucket in BUCKETS and action in ("allow", "deny"):
+                rules.append((sender, bucket, action))
+    # fold the legacy keep-senders.txt in as exo/fins allow rules
+    if os.path.exists(KEEP_SENDERS):
+        for line in open(KEEP_SENDERS):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            for pat in line.split():
+                rules.append((pat.lower(), "fins", "allow"))
+    return rules
+
+
+RULES = load_rules()
+
+
+def rule_match(addr):
+    """(forced_bucket_or_None, denied_buckets_set) for this From address."""
+    allow = None
+    deny = set()
+    for pat, bucket, action in RULES:
+        if pat and pat in addr:
+            if action == "allow" and allow is None:
+                allow = bucket
+            elif action == "deny":
+                deny.add(bucket)
+    return allow, deny
+
+
+# ---- Gmail push (per-account token + label-id cache; same pattern as exo-mail) ----
+def _token(acct):
+    d = json.load(open(os.path.join(CFG.account_maildir(acct), ".credentials.gmailieer.json")))
+    body = urllib.parse.urlencode({"client_id": d["client_id"], "client_secret": d["client_secret"],
+        "refresh_token": d["refresh_token"], "grant_type": "refresh_token"}).encode()
+    return json.load(urllib.request.urlopen(urllib.request.Request(
+        "https://oauth2.googleapis.com/token", data=body), timeout=20))["access_token"]
+
+
+def _gapi(acct, path, method="GET", body=None):
+    tok = _token(acct)
+    req = urllib.request.Request("https://gmail.googleapis.com/gmail/v1/users/me/" + path,
+        data=(json.dumps(body).encode() if body else None),
+        headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json"}, method=method)
+    resp = urllib.request.urlopen(req, timeout=45)
+    raw = resp.read()
+    return json.loads(raw) if raw.strip() else {}
+
+
+_label_cache = {}
+def label_id(acct, name):
+    if acct not in _label_cache:
+        _label_cache[acct] = {l["name"]: l["id"] for l in _gapi(acct, "labels").get("labels", [])}
+    if name not in _label_cache[acct]:
+        resp = _gapi(acct, "labels", "POST",
+            {"name": name, "labelListVisibility": "labelShow", "messageListVisibility": "show"})
+        _label_cache[acct][name] = resp.get("id")
+    return _label_cache[acct].get(name)
+
+
+def gmail_id_of(fp):
+    return fp.strip().split("/")[-1].split(":2,")[0]
+
+
+def acct_of(fp):
+    return "work" if "/work/" in fp else "personal"
+
+
+def push(acct, ids, label_name, remove=False):
+    if not ids:
+        return
+    if not DRY and not os.environ.get("EXO_LABEL_PUSH"):
+        return  # Gmail label push is opt-in (EXO_LABEL_PUSH=1); the 10-min sync stays local-only
+    for i in range(0, len(ids), 900):
+        chunk = ids[i:i + 900]
+        if DRY:
+            print("  DRY Gmail[%s] batchModify %d ids %s=%s sample=%s" %
+                  (acct, len(chunk), "remove" if remove else "add", label_name, chunk[:3]))
+            continue
+        lid = label_id(acct, label_name)
+        body = {"ids": chunk}
+        body["removeLabelIds" if remove else "addLabelIds"] = [lid]
+        _gapi(acct, "messages/batchModify", "POST", body)
+
+
+def batch_tag(ops, label):
+    for i in range(0, len(ops), 2000):
+        chunk = ops[i:i + 2000]
+        if not chunk:
+            continue
+        if DRY:
+            print("  DRY notmuch tag --batch (%s): %d op(s), sample=%r" % (label, len(chunk), chunk[:2]))
+        else:
+            subprocess.run([NOTMUCH, "tag", "--batch"], input="\n".join(chunk), capture_output=True, text=True)
+
+
+def main():
+    self_excl = " and ".join("not from:%s" % s for s in SELF)
+    q = "(path:work/** or path:personal/**) and not tag:exo/classified and %s" % self_excl
+
+    files = nm("search", "--output=files", q).splitlines()
+    if LIMIT:
+        files = files[:LIMIT]
+
+    corr = set()
+    if os.path.exists(CDB):
+        c = sqlite3.connect(CDB)
+        corr = set(r[0] for r in c.execute("SELECT email FROM people WHERE sent>0"))
+
+    # candidate gmail ids by account, derived straight from the maildir filenames —
+    # this is also how EXO_LIMIT sampling stays consistent with the membership check below
+    candidate_gids = {"work": set(), "personal": set()}
+    for fp in files:
+        candidate_gids[acct_of(fp)].add(gmail_id_of(fp))
+
+    # pre-existing bucket membership within THIS candidate set, captured BEFORE any
+    # tagging below — catches tags another tool already set locally (e.g. needs-reply,
+    # reply-later) that were never pushed to Gmail because nothing did that push before.
+    # Scoped against the full unclassified query, then intersected with candidate_gids
+    # so EXO_LIMIT sampling stays scoped to exactly the files we're demonstrating on.
+    preexisting = {b: {"work": set(), "personal": set()} for b in BUCKETS}
+    for b in BUCKETS:
+        out = nm("search", "--output=files", "(%s) and tag:exo/%s" % (q, b)).splitlines()
+        for fp in out:
+            acct, gid = acct_of(fp), gmail_id_of(fp)
+            if gid in candidate_gids[acct]:
+                preexisting[b][acct].add(gid)
+
+    H = BytesHeaderParser()
+    per_bucket_ops = {b: [] for b in BUCKETS}          # notmuch "+exo/<b> -- id:<Message-ID>"
+    per_bucket_ids = {b: {"work": [], "personal": []} for b in BUCKETS}  # gmail push targets (new this run)
+    done_ops = []
+
+    for fp in files:
+        try:
+            with open(fp, "rb") as f:
+                h = H.parse(f)
+        except Exception:
+            continue
+        mid = (str(h.get("Message-ID") or "")).strip().strip("<>").replace('"', "")
+        if not mid:
+            continue
+        acct = acct_of(fp)
+        gid = gmail_id_of(fp)
+        frm = str(h.get("From") or "")
+        ma = re.search(r"[\w.+-]+@[\w.-]+", frm.lower())
+        addr = ma.group(0) if ma else ""
+
+        done_ops.append("+exo/classified -- id:%s" % mid)
+
+        allow, deny = rule_match(addr) if addr else (None, set())
+        if allow:
+            per_bucket_ops[allow].append("+exo/%s -- id:%s" % (allow, mid))
+            per_bucket_ids[allow][acct].append(gid)
+            continue
+
+        bulk = bool(h.get("List-Unsubscribe")) or (h.get("Precedence") or "").lower() in ("bulk", "list") or bool(h.get("List-Id"))
+        if bulk and addr not in corr and "feed" not in deny:
+            per_bucket_ops["feed"].append("+exo/feed +exo/personal-junk -- id:%s" % mid)
+            per_bucket_ids["feed"][acct].append(gid)
+
+    # local tagging: buckets assigned this run, then the classified marker
+    for b in BUCKETS:
+        if per_bucket_ops[b]:
+            batch_tag(per_bucket_ops[b], "exo/%s" % b)
+    batch_tag(done_ops, "exo/classified")
+
+    # rescue: never feed a thread you participated in (any account) — capture
+    # affected files first so we can symmetrically pull the Gmail label back off
+    rescue_q = "tag:exo/feed and thread:{%s}" % " or ".join("from:%s" % e for e in SELF)
+    rescued = nm("search", "--output=files", rescue_q).splitlines()
+    if DRY:
+        print("  DRY notmuch tag -exo/feed -exo/personal-junk -- %s (%d msg)" % (rescue_q, len(rescued)))
+    else:
+        subprocess.run([NOTMUCH, "tag", "-exo/feed", "-exo/personal-junk", "--", rescue_q], capture_output=True)
+    rescued_by_acct = {"work": [], "personal": []}
+    for fp in rescued:
+        rescued_by_acct[acct_of(fp)].append(gmail_id_of(fp))
+
+    # Gmail push: union(pre-existing membership found above, newly-assigned this run),
+    # minus anything the rescue step just pulled back off exo/feed.
+    for b in BUCKETS:
+        for acct in ("work", "personal"):
+            ids = set(per_bucket_ids[b][acct]) | preexisting[b][acct]
+            if b == "feed":
+                ids -= set(rescued_by_acct[acct])
+            if ids:
+                push(acct, sorted(ids), "exo/%s" % b)
+    for acct in ("work", "personal"):
+        if rescued_by_acct[acct]:
+            push(acct, rescued_by_acct[acct], "exo/feed", remove=True)
+
+    n_fins = len(per_bucket_ops["fins"])
+    n_feed = len(per_bucket_ops["feed"])
+    print("classified: +%d fins, +%d feed, %d marked (of %d new)%s" %
+          (n_fins, n_feed, len(done_ops), len(files), "  [EXO_DRY]" if DRY else ""))
+
+
+if __name__ == "__main__":
+    main()

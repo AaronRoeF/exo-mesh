@@ -1,0 +1,66 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+"""exo-mail-contacts — build the Relationship Mesh people index from the mail corpus.
+Per correspondent: sent/received counts, first/last contact, who-initiates, account.
+Optionally enriched from a directory of one markdown file per person
+(EXO_MAIL_PEOPLE). sqlite, no server."""
+import os,sys,re,json,sqlite3,subprocess,glob,time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+from email.parser import BytesHeaderParser
+from email.utils import parsedate_to_datetime, getaddresses
+NOTMUCH=CFG.notmuch_bin(); DB=CFG.store_path("contacts.db")
+ME=CFG.self_emails()
+PEOPLE=CFG.people_dir()
+ACCOUNTS=CFG.accounts()
+def people_map():
+    """{address: file-slug} from the people dir. Empty when none is configured."""
+    m={}
+    if not PEOPLE: return m
+    for fp in glob.glob(PEOPLE+"/*.md"):
+        try: t=open(fp,encoding="utf-8",errors="ignore").read()
+        except Exception: continue
+        name=os.path.basename(fp)[:-3]
+        # only the person's OWN address: scan the YAML frontmatter block, not body prose
+        fm=t.split("---",2)[1] if t.startswith("---") and t.count("---")>=2 else ""
+        emails=set()
+        for line in fm.splitlines():
+            if re.match(r'\s*(email|emails|alias|aliases|primary_email)\s*:',line,re.I):
+                emails.update(re.findall(r'[\w.+-]+@[\w.-]+\.\w+',line))
+        for e in emails: m[e.lower()]=name
+    return m
+def build():
+    t0=time.time(); em=people_map()
+    files=subprocess.run([NOTMUCH,"search","--output=files","*"],capture_output=True,text=True).stdout.splitlines()
+    H=BytesHeaderParser(); ppl={}
+    for fp in files:
+        acct=next((a for a in ACCOUNTS if ('/%s/'%a) in fp), ACCOUNTS[-1] if ACCOUNTS else 'personal')
+        try:
+            with open(fp,'rb') as f: h=H.parse(f)
+        except Exception: continue
+        try: dt=int(parsedate_to_datetime(h.get('Date')).timestamp()) if h.get('Date') else 0
+        except Exception: dt=0
+        frm=getaddresses([str(h.get('From') or '')]); tos=getaddresses([str(h.get('To') or '')+","+str(h.get('Cc') or '')])
+        from_me = any(a.lower() in ME for _,a in frm)
+        def touch(name,addr,sent,recv):
+            addr=addr.lower()
+            if not addr or addr in ME or '@' not in addr: return
+            p=ppl.setdefault(addr,{"name":"","account":acct,"sent":0,"recv":0,"first":dt or 9e18,"last":0})
+            if name and not p["name"]: p["name"]=name[:80]
+            p["sent"]+=sent; p["recv"]+=recv
+            if dt: p["first"]=min(p["first"],dt); p["last"]=max(p["last"],dt)
+        if from_me:
+            for name,addr in tos: touch(name,addr,1,0)   # you -> them
+        else:
+            for name,addr in frm: touch(name,addr,0,1)   # them -> you
+    if os.path.exists(DB): os.remove(DB)
+    con=sqlite3.connect(DB)
+    con.execute("CREATE TABLE people(email TEXT PRIMARY KEY,name TEXT,account TEXT,sent INT,recv INT,total INT,first INT,last INT,person_file TEXT)")
+    for e,p in ppl.items():
+        con.execute("INSERT INTO people VALUES(?,?,?,?,?,?,?,?,?)",(e,p["name"],p["account"],p["sent"],p["recv"],p["sent"]+p["recv"],int(p["first"]) if p["first"]<9e17 else 0,p["last"],em.get(e,"")))
+    con.commit()
+    n=con.execute("SELECT count(*) FROM people").fetchone()[0]
+    twoway=con.execute("SELECT count(*) FROM people WHERE sent>0 AND recv>0").fetchone()[0]
+    linked=con.execute("SELECT count(*) FROM people WHERE person_file!=''").fetchone()[0]
+    print(f"built {n} correspondents ({twoway} two-way, {linked} linked to a person file) in {time.time()-t0:.0f}s; db={os.path.getsize(DB)/2**20:.1f}MB")
+if __name__=="__main__": build()

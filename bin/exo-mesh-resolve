@@ -1,0 +1,191 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+"""exo-mesh-resolve — the mesh identity-resolution bridge.
+
+Unifies email <-> phone <-> iMessage <-> calendar into one canonical person with a
+cross-channel last_contact, widening the 79. Read-only against contacts-master.db
+(the email<->phone spine, already Apple-merged), contacts.db (email stats), the
+iMessage snapshot, and calendar.db (shared-meeting recency); writes
+the store's mesh.db table `identity`.
+
+GOTCHA-CORRECT: iMessage counterparty is resolved via chat_handle_join (1:1 chat =
+exactly 1 participant) + chat_message_join, NEVER `join handle` (sent msgs have
+handle_id=0 -> that join drops ~45%). Per-person, from message/handle directly,
+not from windows. Apple ns date -> unix via /1e9 + 978307200.
+Writes: mesh.db table identity (one canonical person per row).
+"""
+import os, sqlite3, re, json, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+
+MASTER = CFG.store_path("contacts-master.db")
+CONTACTS = CFG.store_path("contacts.db")
+SNAP = CFG.store_path("imessage", "snapshot.db")
+CAL = CFG.store_path("calendar.db")
+MESH = CFG.store_path("mesh.db")
+APPLE_EPOCH = 978307200
+SELF_EMAILS = CFG.self_emails()
+
+def n10(s):
+    d = re.sub(r"\D", "", s or "")
+    return d[-10:] if len(d) >= 10 else ""
+
+# master stores phones space-joined, but a single formatted phone contains
+# spaces (e.g. +1 (555) 0100 style), so a whitespace split shatters it. Extract
+# phone-shaped (3-3-4) runs instead — works for one phone or several.
+PHONE = re.compile(r"\+?1?\s*\(?\d{3}\)?[\s.\-]*\d{3}[\s.\-]*\d{4}")
+def phones_of(s):
+    return [p for p in (n10(m) for m in PHONE.findall(s or "")) if p]
+
+def nem(s):
+    s = (s or "").strip().lower()
+    return s if "@" in s else ""
+
+def imsg_by_counterparty():
+    """{norm_key: {last_unix,count,sent,recv}} over 1:1 chats, sent-inclusive."""
+    c = sqlite3.connect("file:%s?mode=ro" % SNAP, uri=True)
+    part = {}
+    for cid, hid in c.execute("SELECT chj.chat_id, h.id FROM chat_handle_join chj JOIN handle h ON h.ROWID=chj.handle_id"):
+        part.setdefault(cid, set()).add(hid)
+    one = {cid: next(iter(hs)) for cid, hs in part.items() if len(hs) == 1}
+    agg = {}
+    for cid, date, fromme in c.execute("SELECT cmj.chat_id, m.date, m.is_from_me FROM message m JOIN chat_message_join cmj ON cmj.message_id=m.ROWID"):
+        h = one.get(cid)
+        if not h:
+            continue
+        k = n10(h) or nem(h)
+        if not k:
+            continue
+        a = agg.setdefault(k, {"last": 0.0, "first": 0.0, "count": 0, "sent": 0, "recv": 0})
+        u = (date / 1e9 + APPLE_EPOCH) if date else 0
+        if u > a["last"]:
+            a["last"] = u
+        if u and (a["first"] == 0.0 or u < a["first"]):
+            a["first"] = u
+        a["count"] += 1
+        a["sent" if fromme else "recv"] += 1
+    c.close()
+    return agg
+
+def email_stats():
+    c = sqlite3.connect("file:%s?mode=ro" % CONTACTS, uri=True)
+    out = {}
+    pf = CFG.col_of(c, "people", "person_file") or "NULL"
+    for e, sent, recv, first, last, person_file in c.execute(
+            "SELECT lower(email),sent,recv,first,last,%s FROM people" % pf):
+        out[e] = (sent or 0, recv or 0, last or 0, person_file or "", first or 0)
+    c.close()
+    return out
+
+def cal_by_counterparty():
+    """{email: {last_unix, count}} over events with attendees/organizer. ANY shared
+    meeting counts (no size threshold), excluding your own
+    addresses. Apple events carry no attendees today, so this is Google-only.
+    events.start is already unix seconds."""
+    if not os.path.exists(CAL):
+        return {}
+    now = time.time()
+    c = sqlite3.connect("file:%s?mode=ro" % CAL, uri=True)
+    agg = {}
+    # PAST meetings only — a future recurring instance isn't "last contact" yet,
+    # else max(start) grabs a meeting scheduled a year out (caught in TEST 6/7).
+    for att, org, start in c.execute("SELECT attendees, organizer, start FROM events WHERE start<=?", (now,)):
+        if not start:
+            continue
+        who = {e.strip().lower() for e in (att or "").split(",") if "@" in e}
+        o = (org or "").strip().lower()
+        if "@" in o:
+            who.add(o)
+        who -= SELF_EMAILS
+        for e in who:
+            a = agg.setdefault(e, {"last": 0.0, "first": 0.0, "count": 0})
+            if start > a["last"]:
+                a["last"] = start
+            if a["first"] == 0.0 or start < a["first"]:
+                a["first"] = start
+            a["count"] += 1
+    c.close()
+    return agg
+
+def main():
+    testmode = "--test" in sys.argv
+    im = imsg_by_counterparty()
+    es = email_stats()
+    cal = cal_by_counterparty()
+    m = sqlite3.connect("file:%s?mode=ro" % MASTER, uri=True)
+    persons = []
+    for pid, name, emails, phones in m.execute("SELECT id,name,emails,phones FROM master"):
+        em = [x for x in (emails or "").split() if "@" in x]
+        ph = phones_of(phones)
+        persons.append((pid, name, em, ph))
+    m.close()
+
+    rows = []
+    for pid, name, em, ph in persons:
+        me = [es[e.lower()] for e in em if e.lower() in es]
+        email_last = max([x[2] for x in me], default=0)
+        email_sent = sum(x[0] for x in me)
+        email_recv = sum(x[1] for x in me)
+        email_count = email_sent + email_recv
+        email_first = min([x[4] for x in me if x[4]], default=0)
+        person_file = next((x[3] for x in me if x[3]), "")
+        keys = set(ph) | {e.lower() for e in em}
+        ims = [im[k] for k in keys if k in im]
+        imsg_last = max([a["last"] for a in ims], default=0)
+        imsg_first = min([a["first"] for a in ims if a["first"]], default=0)
+        imsg_count = sum(a["count"] for a in ims)
+        imsg_sent = sum(a["sent"] for a in ims)
+        imsg_recv = sum(a["recv"] for a in ims)
+        cals = [cal[e.lower()] for e in em if e.lower() in cal]
+        cal_last = max([a["last"] for a in cals], default=0)
+        cal_first = min([a["first"] for a in cals if a["first"]], default=0)
+        cal_count = sum(a["count"] for a in cals)
+        last = max(email_last, imsg_last, cal_last)
+        firsts = [f for f in (email_first, imsg_first, cal_first) if f]
+        span_first = min(firsts) if firsts else 0
+        span_years = round((last - span_first) / (365.25 * 86400), 1) if (span_first and last) else 0.0
+        chans = [c for c, n in (("email", email_count), ("imessage", imsg_count),
+                                ("calendar", cal_count)) if n]
+        rows.append({"id": pid, "name": name or "", "emails": " ".join(em), "phones": " ".join(ph),
+                     "person_file": person_file, "email_last": email_last, "email_count": email_count,
+                     "email_sent": email_sent, "email_recv": email_recv, "email_first": email_first,
+                     "imsg_last": imsg_last, "imsg_count": imsg_count, "imsg_sent": imsg_sent,
+                     "imsg_recv": imsg_recv, "imsg_first": imsg_first,
+                     "cal_last": cal_last, "cal_count": cal_count, "cal_first": cal_first,
+                     "span_first": span_first, "span_years": span_years,
+                     "last_contact": last, "channels": "+".join(chans)})
+
+    unified = [r for r in rows if r["email_count"] > 0 and r["imsg_count"] > 0]
+    imsg_any = [r for r in rows if r["imsg_count"] > 0]
+    cal_any = [r for r in rows if r["cal_count"] > 0]
+    tri = [r for r in rows if r["email_count"] > 0 and r["imsg_count"] > 0 and r["cal_count"] > 0]
+    multi = [r for r in rows if len(r["channels"].split("+")) >= 2]
+
+    if not testmode:
+        con = sqlite3.connect(MESH)
+        con.execute("DROP TABLE IF EXISTS identity")
+        con.execute("""CREATE TABLE identity(id INTEGER PRIMARY KEY, name TEXT, emails TEXT, phones TEXT,
+            person_file TEXT, email_last REAL, email_count INT, email_sent INT, email_recv INT, email_first REAL,
+            imsg_last REAL, imsg_count INT, imsg_sent INT, imsg_recv INT, imsg_first REAL,
+            cal_last REAL, cal_count INT, cal_first REAL, span_first REAL, span_years REAL,
+            last_contact REAL, channels TEXT)""")
+        con.executemany("""INSERT INTO identity VALUES(:id,:name,:emails,:phones,:person_file,:email_last,
+            :email_count,:email_sent,:email_recv,:email_first,:imsg_last,:imsg_count,:imsg_sent,:imsg_recv,
+            :imsg_first,:cal_last,:cal_count,:cal_first,:span_first,:span_years,
+            :last_contact,:channels)""", rows)
+        con.commit(); con.close()
+
+    print(json.dumps({
+        "identities": len(rows),
+        "unified_email+imsg": len(unified),
+        "prev_bridge": 79,
+        "any_imessage": len(imsg_any),
+        "any_calendar": len(cal_any),
+        "tri_channel_email+imsg+cal": len(tri),
+        "multi_channel(2+)": len(multi),
+        "imsg_counterparties_indexed": len(im),
+        "cal_counterparties_indexed": len(cal),
+        "mesh_db": MESH if not testmode else "(test — not written)"}, indent=2))
+
+if __name__ == "__main__":
+    main()

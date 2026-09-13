@@ -1,0 +1,97 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+DOC = """exo-imsg-search — exact-phrase (lexical) search over iMessage/SMS/RCS.
+
+The dual of notmuch for mail. Day-windows in vectors.db are good at "what is this
+relationship about"; they dilute short phrases across a multi-topic day. This is
+the other half: FTS5 over INDIVIDUAL messages, so a remembered phrase resolves.
+
+  exo-imsg-search --build            rebuild the FTS index from snapshot.db
+  exo-imsg-search "around in 20"     phrase search
+  exo-imsg-search -n 30 invoice draft  term search
+"""
+import os, re, sqlite3, sys, time, datetime
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+
+SNAP=CFG.store_path("imessage", "snapshot.db")
+FTS =CFG.store_path("imessage", "fts.db")
+MASTER=CFG.store_path("contacts-master.db")
+APPLE_EPOCH=978307200
+
+def digits(s): return re.sub(r"\D","",s or "")
+
+def name_map():
+    m={}
+    if not os.path.exists(MASTER): return m
+    c=sqlite3.connect(f"file:{MASTER}?mode=ro",uri=True)
+    for name,emails,phones in c.execute("select name,emails,phones from master where name is not null"):
+        for e in (emails or "").replace(";",",").split(","):
+            e=e.strip().lower()
+            if "@" in e: m.setdefault(e,name)
+        for p in (phones or "").replace(";",",").split(","):
+            d=digits(p)
+            if len(d)>=10: m.setdefault(d[-10:],name)
+    c.close(); return m
+
+def resolve(h,nm):
+    if not h: return "?"
+    if "@" in h: return nm.get(h.lower(),h)
+    d=digits(h)
+    return nm.get(d[-10:],h) if len(d)>=10 else h
+
+def build():
+    if not os.path.exists(SNAP): print("no snapshot -- run `exo-imsg snapshot`",file=sys.stderr); return 2
+    t0=time.time(); tmp=FTS+".tmp"
+    if os.path.exists(tmp): os.remove(tmp)
+    con=sqlite3.connect(tmp)
+    con.execute("CREATE VIRTUAL TABLE msg USING fts5(text, handle UNINDEXED, day UNINDEXED, svc UNINDEXED, me UNINDEXED)")
+    s=sqlite3.connect(f"file:{SNAP}?mode=ro",uri=True)
+    # Sent messages have handle_id=0 -- they reach their counterparty only through
+    # chat_message_join. A plain `join handle` silently drops ~102k outgoing messages.
+    rows=s.execute(f"""select m.text,
+        coalesce(nullif(c.chat_identifier,''), h.id) as counterparty,
+        date(datetime(m.date/1000000000 + {APPLE_EPOCH},'unixepoch')),
+        m.service, m.is_from_me
+        from message m
+        left join chat_message_join cmj on cmj.message_id=m.ROWID
+        left join chat c on c.ROWID=cmj.chat_id
+        left join handle h on h.ROWID=m.handle_id
+        where m.associated_message_type=0 and coalesce(m.text,'')<>''
+        group by m.ROWID""")
+    n=0
+    for batch in iter(lambda: rows.fetchmany(5000), []):
+        con.executemany("INSERT INTO msg(text,handle,day,svc,me) VALUES(?,?,?,?,?)", batch)
+        n+=len(batch)
+    con.commit(); con.execute("INSERT INTO msg(msg) VALUES('optimize')"); con.commit()
+    con.close(); s.close(); os.replace(tmp,FTS)
+    mb=os.path.getsize(FTS)/1048576
+    print(f"  fts: {n:,} messages · {mb:.1f} MB · {time.time()-t0:.1f}s")
+    return 0
+
+def search(q,limit):
+    if not os.path.exists(FTS): print("no fts index -- run `exo-imsg-search --build`",file=sys.stderr); return 2
+    con=sqlite3.connect(f"file:{FTS}?mode=ro",uri=True); nm=name_map()
+    try:
+        rows=con.execute("""select day,handle,svc,me,text,rank from msg
+            where msg match ? order by rank limit ?""",(q,limit)).fetchall()
+    except sqlite3.OperationalError as e:
+        print(f"bad query {q!r}: {e}",file=sys.stderr); return 3
+    if not rows: print("  no matches"); return 1
+    for day,h,svc,me,txt,_ in rows:
+        who=resolve(h,nm)
+        arrow="→" if me else "←"
+        t=" ".join((txt or "").split())
+        print(f"  {day}  {arrow} {who[:28]:28s} [{(svc or '?')[:8]:8s}] {t[:100]}")
+    print(f"\n  {len(rows)} match(es)")
+    return 0
+
+if __name__=="__main__":
+    a=sys.argv[1:]
+    if not a or a[0] in ("-h","--help"): print(DOC); sys.exit(0)
+    if a[0]=="--build": sys.exit(build())
+    limit=20
+    if a[0]=="-n": limit=int(a[1]); a=a[2:]
+    q=" ".join(a)
+    if " " in q and not any(c in q for c in '"*:()'): q=f'"{q}"'   # bare phrase -> quoted
+    sys.exit(search(q,limit))

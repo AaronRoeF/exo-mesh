@@ -1,0 +1,216 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+DOC = """exo-mail-filter — persistent per-sender allow/deny rules for exo/* buckets.
+
+  exo-mail-filter add <sender> <bucket>     # allow rule: force bucket, retro-apply now
+  exo-mail-filter remove <sender> <bucket>  # deny rule: forbid bucket, retro-strip now
+  exo-mail-filter list                      # show all rules
+
+Rules persist to sender-rules.tsv in the store (sender, bucket, action, added_iso;
+one row per sender+bucket pair — add/remove upsert the action). exo-mail-classify
+loads this file before its header heuristics: an allow rule forces the bucket, a
+deny rule forbids it. `sender` may be a full address or a bare domain (matched the
+same way notmuch's `from:` search / the legacy keep-senders.txt list matched —
+substring/domain match against the From address).
+
+add/remove retro-apply to EXISTING mail: notmuch tag the matches, then push (or
+remove) the Gmail label for those exact messages via batchModify in whichever
+account(s) they live in (notmuch maildir filenames ARE the Gmail message ids).
+
+EXO_DRY=1 prints every intended notmuch/API call and the rule-file write without
+executing or writing anything — validate with EXO_DRY before any real run.
+"""
+import os, sys, json, subprocess, urllib.request, urllib.parse, datetime
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+
+NOTMUCH = CFG.notmuch_bin()
+RULES_TSV = CFG.store_path("sender-rules.tsv")
+BUCKETS = ("vip", "feed", "fins", "updates", "paper-trail", "needs-reply", "reply-later")
+DRY = bool(os.environ.get("EXO_DRY"))
+HEADER = "# sender\tbucket\taction\tadded_iso\n"
+
+
+def nm(*a):
+    return subprocess.run([NOTMUCH, *a], capture_output=True, text=True)
+
+
+def _token(acct):
+    d = json.load(open(os.path.join(CFG.account_maildir(acct), ".credentials.gmailieer.json")))
+    body = urllib.parse.urlencode({"client_id": d["client_id"], "client_secret": d["client_secret"],
+        "refresh_token": d["refresh_token"], "grant_type": "refresh_token"}).encode()
+    return json.load(urllib.request.urlopen(urllib.request.Request(
+        "https://oauth2.googleapis.com/token", data=body), timeout=20))["access_token"]
+
+
+def _gapi(acct, path, method="GET", body=None):
+    tok = _token(acct)
+    req = urllib.request.Request("https://gmail.googleapis.com/gmail/v1/users/me/" + path,
+        data=(json.dumps(body).encode() if body else None),
+        headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json"}, method=method)
+    resp = urllib.request.urlopen(req, timeout=45)
+    raw = resp.read()
+    return json.loads(raw) if raw.strip() else {}
+
+
+_label_cache = {}
+def label_id(acct, name):
+    if acct not in _label_cache:
+        _label_cache[acct] = {l["name"]: l["id"] for l in _gapi(acct, "labels").get("labels", [])}
+    if name not in _label_cache[acct]:
+        resp = _gapi(acct, "labels", "POST",
+            {"name": name, "labelListVisibility": "labelShow", "messageListVisibility": "show"})
+        _label_cache[acct][name] = resp.get("id")
+    return _label_cache[acct].get(name)
+
+
+def gmail_id_of(fp):
+    return fp.strip().split("/")[-1].split(":2,")[0]
+
+
+def acct_of(fp):
+    return "work" if "/work/" in fp else "personal"
+
+
+def batch_modify(acct, ids, add=None, remove=None):
+    if not ids:
+        return
+    for i in range(0, len(ids), 900):
+        chunk = ids[i:i + 900]
+        if DRY:
+            print("  DRY Gmail[%s] batchModify %d ids add=%s remove=%s sample=%s"
+                  % (acct, len(chunk), add, remove, chunk[:3]))
+            continue
+        body = {"ids": chunk}
+        if add:
+            body["addLabelIds"] = add
+        if remove:
+            body["removeLabelIds"] = remove
+        _gapi(acct, "messages/batchModify", "POST", body)
+
+
+def load_rules():
+    rows = []
+    if os.path.exists(RULES_TSV):
+        for line in open(RULES_TSV):
+            line = line.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            p = line.split("\t")
+            if len(p) >= 4:
+                rows.append(p[:4])
+    return rows
+
+
+def save_rules(rows):
+    if DRY:
+        print("  DRY write %s (%d rule row(s))" % (RULES_TSV, len(rows)))
+        return
+    os.makedirs(os.path.dirname(RULES_TSV), exist_ok=True)
+    with open(RULES_TSV, "w") as f:
+        f.write(HEADER)
+        for r in rows:
+            f.write("\t".join(r) + "\n")
+
+
+def upsert(sender, bucket, action):
+    rows = load_rules()
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    found = False
+    out = []
+    for s, b, a, ts in rows:
+        if s == sender and b == bucket:
+            out.append([sender, bucket, action, now])
+            found = True
+        else:
+            out.append([s, b, a, ts])
+    if not found:
+        out.append([sender, bucket, action, now])
+    save_rules(out)
+    return out
+
+
+def retro_apply(sender, bucket, action):
+    """notmuch tag existing mail from sender, then push/remove the Gmail label."""
+    label = "exo/%s" % bucket
+    op = ("+%s" % label) if action == "allow" else ("-%s" % label)
+    rc = nm("search", "--output=files", "from:%s" % sender)
+    files = [l for l in rc.stdout.splitlines() if l.strip()]
+    by_acct = {"work": [], "personal": []}
+    for fp in files:
+        by_acct[acct_of(fp)].append(gmail_id_of(fp))
+    print("  matched %d existing message(s) (work=%d, personal=%d)"
+          % (len(files), len(by_acct["work"]), len(by_acct["personal"])))
+    if DRY:
+        print("  DRY notmuch tag %s -- from:%s" % (op, sender))
+    else:
+        r = nm("tag", op, "--", "from:%s" % sender)
+        if r.returncode:
+            print("  ! notmuch tag failed:", r.stderr.strip()[:200])
+    for acct, ids in by_acct.items():
+        if not ids:
+            continue
+        if DRY:
+            batch_modify(acct, ids, add=[label] if action == "allow" else None,
+                         remove=[label] if action == "deny" else None)
+        else:
+            lid = label_id(acct, label)
+            batch_modify(acct, ids, add=[lid] if action == "allow" else None,
+                         remove=[lid] if action == "deny" else None)
+
+
+def check_bucket(bucket):
+    if bucket not in BUCKETS:
+        print("unknown bucket: %s (valid: %s)" % (bucket, ", ".join(BUCKETS)))
+        sys.exit(1)
+
+
+def cmd_add(sender, bucket):
+    check_bucket(bucket)
+    print("ALLOW: %s -> exo/%s%s" % (sender, bucket, "  [EXO_DRY]" if DRY else ""))
+    retro_apply(sender, bucket, "allow")
+    upsert(sender, bucket, "allow")
+    print("rule %s" % ("would be written (EXO_DRY)" if DRY else "saved to " + RULES_TSV))
+
+
+def cmd_remove(sender, bucket):
+    check_bucket(bucket)
+    print("DENY: %s -/-> exo/%s%s" % (sender, bucket, "  [EXO_DRY]" if DRY else ""))
+    retro_apply(sender, bucket, "deny")
+    upsert(sender, bucket, "deny")
+    print("rule %s" % ("would be written (EXO_DRY)" if DRY else "saved to " + RULES_TSV))
+
+
+def cmd_list():
+    rows = load_rules()
+    if not rows:
+        print("(no sender rules yet)")
+        return
+    for s, b, a, ts in rows:
+        print("%-32s  exo/%-14s  %-6s  %s" % (s, b, a, ts))
+    print("%d rule(s)" % len(rows))
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        print(DOC)
+        return 1
+    cmd = args[0]
+    if cmd == "list":
+        cmd_list()
+        return 0
+    if cmd in ("add", "remove"):
+        if len(args) < 3:
+            print("usage: exo-mail-filter %s <sender> <bucket>" % cmd)
+            return 1
+        sender = args[1].strip().lower()
+        bucket = args[2].strip().lower().replace("exo/", "")
+        (cmd_add if cmd == "add" else cmd_remove)(sender, bucket)
+        return 0
+    print("usage: exo-mail-filter <add|remove|list> ...")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)

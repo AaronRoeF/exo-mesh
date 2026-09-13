@@ -1,0 +1,11 @@
+# Direct dependencies. Everything else in the venv arrives transitively — lieer
+# alone pulls google-api-python-client, google-auth*, notmuch2 and tqdm.
+#
+#   python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
+#
+# For a byte-identical rebuild of a known-good environment use the full pinned
+# set instead:  ./venv/bin/pip install -r requirements-lock.txt
+
+lieer==1.6                  # Gmail <-> Maildir sync; exo-gmi wraps it
+sqlite-vec==0.1.9           # vector index behind `exo-mail semantic`
+email-reply-parser==0.5.12  # strips quoted history before embedding

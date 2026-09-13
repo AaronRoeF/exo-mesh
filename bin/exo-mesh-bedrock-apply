@@ -1,0 +1,170 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+"""exo-mesh-bedrock-apply — write BEDROCK designations into person files from a
+confirmed list.
+
+BEDROCK criterion 4 ("survived a context change") is a human call, not a query; this
+tool records that call. Input is a TSV of confirmed people (EXO_MAIL_BEDROCK_STAGE,
+default bedrock-confirmed.tsv in the work dir). It CREATEs a person file where none
+exists (name + emails from the mesh + bedrock:true + relationship + provenance) and
+UPDATEs an existing one by inserting the bedrock frontmatter (never clobbering).
+Emails/span are read from mesh.db by the confirmed mesh_match name. DRY-RUN by
+default; --apply writes. Reversible (local markdown).
+
+Needs EXO_MAIL_PEOPLE set to a person-file directory; exits 2 if it is not.
+"""
+import os, re, sqlite3, sys, datetime
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+
+STAGE = CFG.get("EXO_MAIL_BEDROCK_STAGE") or os.path.join(CFG.workdir(), "bedrock-confirmed.tsv")
+PEOPLE = CFG.people_dir()
+MESH = CFG.store_path("mesh.db")
+TODAY = datetime.date.today().isoformat()
+APPLY = "--apply" in sys.argv
+
+def slugify(name):
+    import unicodedata
+    name = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode()  # é -> e
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+def clean_name(name):
+    """Collapse consecutive duplicate tokens ('Jordan Rivera Rivera' -> 'Jordan
+    Rivera') — a known mesh cosmetic glitch. Leaves everything else untouched."""
+    toks = (name or "").split()
+    out = []
+    for t in toks:
+        if not out or out[-1].lower() != t.lower():
+            out.append(t)
+    return " ".join(out)
+
+def mesh_of(name):
+    """(emails[list], person_file, span_years) for the best identity match, or ([],'',0)."""
+    if not name or name in ("?", "(none)") or name.endswith("?") or not os.path.exists(MESH):
+        return ([], "", 0.0)
+    c = sqlite3.connect("file:%s?mode=ro" % MESH, uri=True); c.row_factory = sqlite3.Row
+    r = c.execute("SELECT * FROM identity WHERE name=? ORDER BY span_years DESC LIMIT 1", (name,)).fetchone()
+    if not r:
+        r = c.execute("SELECT * FROM identity WHERE name LIKE ? ORDER BY span_years DESC LIMIT 1",
+                      ("%" + name + "%",)).fetchone()
+    c.close()
+    if not r: return ([], "", 0.0)
+    emails = [e for e in (r["emails"] or "").split() if "@" in e and "facebook.com" not in e]
+    if not emails:
+        emails = [e for e in (r["emails"] or "").split() if "@" in e]
+    return (emails, CFG.row_get(r, "person_file") or "", r["span_years"] or 0.0)
+
+def read_stage():
+    rows = []
+    for ln in open(STAGE, encoding="utf-8"):
+        if ln.startswith("#") or not ln.strip(): continue
+        p = ln.rstrip("\n").split("\t")
+        if len(p) < 5: continue
+        said, match, pfile, rel, action = p[0], p[1], p[2], p[3], p[4]
+        email = p[6].strip() if len(p) > 6 else ""   # optional explicit email (index 6)
+        rows.append({"said": said, "match": match, "pfile": pfile, "rel": rel,
+                     "action": action, "email": email})
+    return rows
+
+def resolve_name(row):
+    m = row["match"]
+    if m and m not in ("?", "(none)") and not m.endswith("?"):
+        return m
+    return row["said"]
+
+def find_file(row, name, person_file):
+    pf = row["pfile"]
+    if pf and pf not in ("?", "(none)"):
+        return os.path.join(PEOPLE, pf)
+    if person_file:
+        cand = os.path.join(PEOPLE, person_file + ".md")
+        if os.path.exists(cand): return cand
+    return os.path.join(PEOPLE, slugify(name) + ".md")
+
+def insert_bedrock_fm(text, rel):
+    """Insert bedrock fields into an existing frontmatter block (idempotent)."""
+    m = re.match(r"^---\n(.*?\n)---\n", text, re.S)
+    if not m:
+        return text, False
+    fm = m.group(1)
+    if re.search(r"^bedrock:", fm, re.M):
+        return text, False
+    add = "bedrock: true\nbedrock_confirmed: %s   # criterion-4 — %s\n" % (TODAY, rel)
+    newfm = fm.rstrip("\n") + "\n" + add
+    body = text[m.end():]
+    note = "\n- [%s] BEDROCK designation applied (criterion-4) — %s.\n" % (TODAY, rel)
+    if "## Interactions" in body:
+        body = body.replace("## Interactions", "## Interactions" , 1) + note if not body.rstrip().endswith(note.strip()) else body
+    else:
+        body = body.rstrip() + "\n\n## Interactions\n" + note
+    return text[:m.start()] + "---\n" + newfm + "---\n" + body, True
+
+def create_file(path, name, emails, rel, span):
+    email = emails[0] if emails else ""
+    spann = (" mesh span %.1fy." % span) if span else ""
+    return ("---\n"
+            "name: %s\n"
+            "org:\n"
+            "title:\n"
+            "type: other          # %s\n"
+            "email: %s\n"
+            "last_updated: %s\n"
+            "bedrock: true\n"
+            "bedrock_confirmed: %s   # criterion-4\n"
+            "---\n"
+            "<!-- created by exo-mesh-bedrock-apply %s -->\n\n"
+            "# %s\n\n"
+            "## Context\n"
+            "- **BEDROCK** relationship (confirmed %s): %s.%s\n\n"
+            "## Interactions\n"
+            "<!-- Format: - [YYYY-MM-DD] <source>: <what happened> -->\n"
+            "- [%s] BEDROCK designation applied (criterion-4) — %s.\n"
+            % (name, rel, ('"%s"' % email) if email else "", TODAY, TODAY, TODAY,
+               name, TODAY, rel, spann, TODAY, rel))
+
+def main():
+    if not PEOPLE:
+        print("no person-file directory configured — set EXO_MAIL_PEOPLE "
+              "(see config.env.example)"); return 2
+    if not os.path.exists(STAGE):
+        print("no staging file: %s" % STAGE); return 2
+    plan = {"create": [], "update": [], "skip": []}
+    for row in read_stage():
+        if row["action"] not in ("create", "update"):
+            plan["skip"].append((row["said"], row["action"])); continue
+        name = clean_name(resolve_name(row))
+        emails, person_file, span = mesh_of(row["match"] if not row["match"].endswith("?") else "")
+        if not emails:  # try the said-name too (stubs won't have any)
+            emails, person_file, span = mesh_of(name)
+        if row.get("email"):            # explicit override wins (merged rows leak the wrong address)
+            emails = [row["email"]]
+        path = find_file(row, name, person_file)
+        if os.path.exists(path):
+            plan["update"].append((name, path, row["rel"], emails, span))
+        else:
+            plan["create"].append((name, path, row["rel"], emails, span))
+
+    print("BEDROCK apply — %s\n" % ("APPLYING" if APPLY else "DRY-RUN (no writes; pass --apply)"))
+    for name, path, rel, emails, span in plan["create"]:
+        print("  CREATE  %-26s %-22s span=%.1fy %s" % (name[:26], os.path.basename(path), span, emails[0] if emails else "(stub — no email)"))
+    for name, path, rel, emails, span in plan["update"]:
+        print("  UPDATE  %-26s %-22s (+bedrock:true)" % (name[:26], os.path.basename(path)))
+    for said, action in plan["skip"]:
+        print("  skip    %-26s (%s)" % (said[:26], action))
+
+    if APPLY:
+        n = 0
+        for name, path, rel, emails, span in plan["create"]:
+            if os.path.exists(path): continue
+            open(path, "w", encoding="utf-8").write(create_file(path, name, emails, rel, span)); n += 1
+        for name, path, rel, emails, span in plan["update"]:
+            t = open(path, encoding="utf-8").read()
+            t2, changed = insert_bedrock_fm(t, rel)
+            if changed: open(path, "w", encoding="utf-8").write(t2); n += 1
+        print("\nwrote/updated %d people files." % n)
+    else:
+        print("\n%d create · %d update · %d skip. Re-run with --apply to write."
+              % (len(plan["create"]), len(plan["update"]), len(plan["skip"])))
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)

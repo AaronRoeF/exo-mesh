@@ -1,0 +1,64 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+"""exo-mail-label-backfill — push EVERY local exo/* bucket tag up as a Gmail label,
+independent of classification state. One-time parity backfill so both inboxes
+visually show the buckets. Idempotent (batchModify addLabel is a no-op if present).
+EXO_DRY=1 = counts only, no writes.
+"""
+import os, json, subprocess, urllib.request, urllib.parse, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+
+NM = CFG.notmuch_bin()
+# EXO_MAIL_BUCKETS: which exo/* namespaces to keep in sync with Gmail labels.
+BUCKETS = [b.strip() for b in CFG.get(
+    "EXO_MAIL_BUCKETS",
+    "vip,feed,fins,updates,paper-trail,needs-reply,reply-later").split(",") if b.strip()]
+DRY = bool(os.environ.get("EXO_DRY"))
+
+def token(acct):
+    d = json.load(open(os.path.join(CFG.account_maildir(acct), ".credentials.gmailieer.json")))
+    b = urllib.parse.urlencode({"client_id": d["client_id"], "client_secret": d["client_secret"],
+        "refresh_token": d["refresh_token"], "grant_type": "refresh_token"}).encode()
+    return json.load(urllib.request.urlopen("https://oauth2.googleapis.com/token", data=b, timeout=30))["access_token"]
+
+def gapi(tok, path, method="GET", body=None):
+    r = urllib.request.Request("https://gmail.googleapis.com/gmail/v1/users/me/" + path,
+        data=(json.dumps(body).encode() if body else None),
+        headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json"}, method=method)
+    resp = urllib.request.urlopen(r, timeout=60); raw = resp.read()
+    return json.loads(raw) if raw.strip() else {}
+
+def ids_for(tag, acct):
+    out = subprocess.run([NM, "search", "--output=files", "tag:exo/%s and path:%s/**" % (tag, acct)],
+                         capture_output=True, text=True).stdout
+    ids = []
+    for f in out.splitlines():
+        if f.strip():
+            ids.append(os.path.basename(f).split(":2,")[0])
+    return sorted(set(ids))
+
+def main():
+    grand = {}
+    for acct in ("work", "personal"):
+        tok = token(acct)
+        lmap = {l["name"]: l["id"] for l in gapi(tok, "labels")["labels"]}
+        for b in BUCKETS:
+            lname = "exo/" + b
+            if lname not in lmap:
+                continue
+            ids = ids_for(b, acct)
+            if not ids:
+                continue
+            grand["%s/%s" % (acct, b)] = len(ids)
+            if DRY:
+                print("  DRY [%s] %s: %d messages" % (acct, lname, len(ids)))
+                continue
+            lid = lmap[lname]
+            for i in range(0, len(ids), 900):
+                gapi(tok, "messages/batchModify", "POST", {"ids": ids[i:i + 900], "addLabelIds": [lid]})
+            print("  [%s] %s: pushed %d" % (acct, lname, len(ids)), flush=True)
+    print(json.dumps({"pushed": grand, "total": sum(grand.values()), "dry": DRY}, indent=2))
+
+if __name__ == "__main__":
+    main()

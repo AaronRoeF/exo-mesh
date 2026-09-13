@@ -1,0 +1,32 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+"""exo-mesh — front door to the mesh: the local-first join over your mail,
+contacts, calendar, and todos. Bare `exo-mesh` shows your day; `exo-mesh caps`
+lists what you can do. A thin launcher over the underlying tools — it renames
+nothing, it's just the memorable entry point.
+"""
+import sys, os, subprocess
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+
+BIN = os.path.dirname(os.path.abspath(__file__))
+a = sys.argv[1:]
+
+if a and a[0] in ("caps", "capabilities", "help", "-h", "--help"):
+    print("exo-mesh — one mesh over mail · contacts · calendar · todos\n")
+    print("  exo-mesh                     your whole day, one local read (= exo-day)")
+    print("  exo-mail brief               the reply queue + drifting relationships")
+    print("  exo-mail box imbox           real correspondence, newsletters filtered")
+    print("  exo-mail contact show <name> one whole person across all addresses")
+    print("  exo-mail reconnect \"<name>\"   warm re-connect for a drifted relationship")
+    print("  exo-mail bedrock candidates  enduring relationships (outlived their context)")
+    print("  exo-mail search|semantic ..  keyword or meaning search, offline")
+    print("  exo-cal stats                local calendar replica (3 sources)")
+    print("  exo-mail-filter add <s> <b>  pin a sender to a bucket, permanently")
+    _caps = CFG.caps_url()
+    if _caps:
+        print("\n  full reminder: %s" % _caps)
+    sys.exit(0)
+
+# default: the unified day
+sys.exit(subprocess.run([os.path.join(BIN, "exo-day"), *a]).returncode)

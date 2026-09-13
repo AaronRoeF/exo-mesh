@@ -1,0 +1,29 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+"""Tag threads that genuinely need your reply: in inbox, from a real person
+(vip or a two-way correspondent), where the latest message is not from you."""
+import subprocess,os,sys,sqlite3,re
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+from email.parser import BytesHeaderParser
+NM=CFG.notmuch_bin(); ME=CFG.self_emails()
+def nm(*a): return subprocess.run([NM,*a],capture_output=True,text=True).stdout
+corr=set(r[0] for r in sqlite3.connect(CFG.store_path("contacts.db")).execute("SELECT email FROM people WHERE sent>0 AND recv>0"))
+# candidate inbox threads: in inbox, not bucketed as noise
+nm("tag","-exo/needs-reply","--","tag:exo/needs-reply")  # reset
+thread_ids=nm("search","--output=threads","tag:inbox and not tag:exo/feed and not tag:exo/updates and not tag:exo/fins and not tag:exo/paper-trail").splitlines()
+H=BytesHeaderParser(); tagged=0; batch=[]
+for tid in thread_ids:
+    files=nm("search","--output=files",tid).splitlines()
+    if not files: continue
+    try:
+        with open(files[-1],"rb") as f: h=H.parse(f)  # newest message
+    except Exception: continue
+    frm=str(h.get("From") or ""); m=re.search(r'[\w.+-]+@[\w.-]+',frm.lower()); addr=m.group(0) if m else ''
+    if addr in ME: continue                      # latest is from you -> already replied
+    if addr not in corr: continue                 # only real correspondents
+    mid=(str(h.get("Message-ID") or "")).strip().strip("<>").replace('"','')
+    if mid: batch.append("+exo/needs-reply -- id:%s"%mid); tagged+=1
+for i in range(0,len(batch),2000):
+    subprocess.run([NM,"tag","--batch"],input="\n".join(batch[i:i+2000]),capture_output=True,text=True)
+print("needs-reply tagged:",tagged)

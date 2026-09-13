@@ -1,0 +1,62 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+"""exo-mail-ensure-labels — ensure the full exo/* label set exists in every
+configured Gmail account. GET labels, create only what is missing. Idempotent:
+never duplicates, never deletes. Prints the resulting label set per account.
+EXO_DRY=1 reports what would be created without writing."""
+import os, sys, json, urllib.request, urllib.parse
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+
+LABELS = ["exo/" + b.strip() for b in CFG.get(
+    "EXO_MAIL_BUCKETS",
+    "vip,feed,fins,updates,paper-trail,needs-reply,reply-later").split(",") if b.strip()]
+ACCOUNTS = CFG.accounts()
+DRY = bool(os.environ.get("EXO_DRY"))
+
+
+def _token(acct):
+    d = json.load(open(os.path.join(CFG.account_maildir(acct), ".credentials.gmailieer.json")))
+    body = urllib.parse.urlencode({"client_id": d["client_id"], "client_secret": d["client_secret"],
+        "refresh_token": d["refresh_token"], "grant_type": "refresh_token"}).encode()
+    return json.load(urllib.request.urlopen(urllib.request.Request(
+        "https://oauth2.googleapis.com/token", data=body), timeout=20))["access_token"]
+
+
+def _gapi(acct, path, method="GET", body=None):
+    tok = _token(acct)
+    req = urllib.request.Request("https://gmail.googleapis.com/gmail/v1/users/me/" + path,
+        data=(json.dumps(body).encode() if body else None),
+        headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json"}, method=method)
+    resp = urllib.request.urlopen(req, timeout=30)
+    raw = resp.read()
+    return json.loads(raw) if raw.strip() else {}
+
+
+def ensure(acct):
+    existing = _gapi(acct, "labels")
+    have = {l["name"]: l["id"] for l in existing.get("labels", [])}
+    missing = [name for name in LABELS if name not in have]
+    if DRY:
+        print("DRY[%s]: would create %s" % (acct, missing or "(none — all present)"))
+        return sorted(n for n in LABELS if n in have or n in missing), []
+    created = []
+    for name in missing:
+        resp = _gapi(acct, "labels", "POST",
+            {"name": name, "labelListVisibility": "labelShow", "messageListVisibility": "show"})
+        have[name] = resp.get("id")
+        created.append(name)
+    return sorted(n for n in LABELS if n in have), created
+
+
+def main():
+    for acct in ACCOUNTS:
+        result_set, created = ensure(acct)
+        if not DRY:
+            print("[%s] created: %s" % (acct, created or "(none — already present)"))
+            print("[%s] full exo label set now: %s" % (acct, result_set))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,20 @@
+# The runtime lives beside this tree, never in it.
+venv/
+*.log
+*.bak*
+__pycache__/
+*.pyc
+
+# Local configuration names directories on your machine. config.env.example is
+# the tracked template; the copy you edit is not.
+config.env
+
+# Data and machine-local state live in the store (default ~/Mail/exo) and are
+# backed up separately. None of it belongs in git.
+*.db
+*.jsonl
+keep-senders.txt
+sender-rules.tsv
+mesh-suppress.tsv
+contacts-master-strip.tsv
+bedrock-confirmed.tsv
