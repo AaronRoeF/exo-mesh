@@ -1,23 +1,37 @@
 # exo-mesh
 
-**A local-first replica of your mail, calendar, iMessage and contacts — and a
-relationship mesh that unifies one person across all four.**
+**Local-first: your mail, calendar, iMessage and contacts replicated to your own
+disk, and joined into one record per person.**
 
-Your inbox knows a fragment of each relationship. Your phone knows another. Your
-calendar knows a third. Nothing joins them, so every question that spans mediums —
-*when did I actually last talk to this person, and about what?* — is unanswerable
-without four searches and a guess.
+You've already lived the failure. You open with "it's been forever!" to someone you
+texted on Tuesday, because the email thread said six months and nothing thought to
+ask the phone.
 
-exo-mail answers it in one local read. It mirrors your Gmail accounts to a Maildir
-indexed by [notmuch](https://notmuchmail.org/), pulls your calendars and a read-only
-snapshot of your iMessage database, merges your contacts into one master record, and
-resolves all of it into a **mesh**: one row per person, carrying every address and
-phone number they own, per-channel counts and recency, who usually initiates, and
-how long the relationship has run.
+Four systems hold four fragments of the same relationship, and there's no seam
+between them. So the question you actually have — *when did I last talk to Priya, and
+about what?* — costs four searches and a guess.
 
-Everything is on your disk. No service, no daemon, no API key on the query path. A
-question about your own life is answered in single-digit milliseconds, offline, and
-your relationship data never leaves the machine to answer it.
+exo-mesh answers it in one local read. It mirrors your Gmail to a
+[notmuch](https://notmuchmail.org/)-indexed Maildir, pulls your calendars, takes a
+read-only snapshot of iMessage, merges your contacts, and resolves the whole pile
+into a **mesh**: one row per person, carrying every address and number they own,
+per-channel recency, who usually starts the conversation, and how many years it has
+run.
+
+Everything stays on your disk. No service, no daemon, no API key on the query path.
+Your relationship history is the most revealing corpus you own, and this is the copy
+that answers in single-digit milliseconds without renting it to anyone.
+
+That matters more this year than last. Every agent you build wants context, and the
+honest way to give it context about your life is a store you own, on hardware you
+control, under a retention policy you wrote yourself. This one runs against a
+six-figure message archive, not a demo fixture.
+
+Four channels. One person. Zero egress.
+
+![Four channels in, one person out: mail, calendar, iMessage and contacts are pulled
+into local replicas, resolved by email, phone and name into a mesh holding one row per
+person, which the CLI and MCP server read — nothing leaves the machine.](assets/exo-mesh.svg)
 
 ---
 
