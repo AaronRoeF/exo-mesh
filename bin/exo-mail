@@ -281,11 +281,22 @@ def _mesh_drift(days, limit, now=None):
             "ORDER BY (email_count+imsg_count) DESC", [cutoff]).fetchall()
     except sqlite3.OperationalError: con.close(); return None
     con.close()
-    sup=_mesh_suppressed(("drift","all"))
+    sup_drift=_mesh_suppressed(("drift",))
+    sup_all=_mesh_suppressed(("all",))
     def kept(r):
+        """Work-suppress, keep personal.
+
+        A person owns several keys -- a work address, a personal address, a phone.
+        scope=all on ANY key is a hard cut: the whole person goes. scope=drift on a
+        key silences THAT KEY only, and the person leaves drift only when every key
+        they own is silenced. Otherwise suppressing a dead work mailbox would also
+        silence the personal address and the iMessage thread that are still alive --
+        the exact opposite of what work-suppression means. Someone can leave a job
+        without leaving your life."""
         owned={e.strip().lower() for e in (r["emails"] or "").split() if e.strip()} \
               | {p for p in (r["phones"] or "").split() if p}
-        return not (owned & sup)
+        if owned & sup_all: return False
+        return bool(owned - sup_drift)
     rows=[r for r in rows if kept(r)][:limit]
     return [_mesh_row(r, now) for r in rows]
 
