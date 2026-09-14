@@ -32,6 +32,12 @@ person, which the CLI and MCP server read — nothing leaves the machine.](asset
 
 ---
 
+## IMPORTANT NOTE ON GOVERNANCE AND SECURITY
+
+I'm leaving out big parts of my implementation because I'm not interested in disclosing all the specifics of my security and governance setup. You can see parts of what I'm doing here: agentrust-io.com if you're interested. And generally assume this is a project I'm sharing, not a product. I hope you get value. Enjoy! 
+
+---
+
 ## What you get
 
 **Total recall before a conversation.** `exo-mail contact show "Jordan Rivera"`
