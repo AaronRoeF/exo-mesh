@@ -1,28 +1,26 @@
 # exo-mesh
 
-**Walk into every conversation with the whole relationship in front of you — not
-the fragment one inbox remembers. Mail, calendar, iMessage and contacts, joined on
-your own disk into one record per person.**
+**Walk into every conversation with the whole relationship in front of you, not the
+fragment one inbox remembers.**
 
-Four systems hold four fragments of the same relationship, and there's no seam
-between them. So the question you actually have — *when did I last talk to Priya, and
-about what?* — costs four searches and a guess. What are our open items? Where did we leave off? 
+Four systems each hold a quarter of every relationship you have, and nothing joins them. So the
+questions you actually ask — when did I last talk to this person, what are our open items, where
+did we leave off — cost four searches and a guess.
 
-exo-mesh answers it in one local read. It mirrors your Gmail to a
-[notmuch](https://notmuchmail.org/)-indexed Maildir, pulls your calendars, takes a
-read-only snapshot of iMessage, merges your contacts, and resolves the whole pile
-into a **mesh**: one row per person, carrying every address and number they own,
-per-channel recency, who usually starts the conversation, and how many years it has
-run.
+exo-mesh answers them in one local read. It mirrors your Gmail into a
+[notmuch](https://notmuchmail.org/)-indexed Maildir, pulls your calendars, takes a read-only
+snapshot of iMessage, merges your contacts, and resolves the whole pile into a **mesh**: one row
+per person, carrying every address and number they own, per-channel recency, who usually starts the
+conversation, and how many years it's run.
 
-Everything stays on your disk. No service, no daemon, no API key on the query path.
-Your relationship history is the most revealing corpus you own, and this is the copy
-that answers in single-digit milliseconds without renting it to anyone.
+Everything stays on your disk. No service, no daemon, no API key on the query path. Your
+relationship history is the most revealing corpus you own, and this is the copy that answers in
+single-digit milliseconds without renting it to anyone.
 
-And it is the store an agent can read. `exo-mail mcp` speaks MCP, so every agent,
-skill and draft you build reasons over the whole relationship instead of one inbox's
-fragment — from a file on your disk, under a retention policy you wrote yourself. It
-runs against a six-figure message archive, not a demo fixture.
+And it's the store an agent can read. `exo-mail mcp` speaks MCP, so every agent, skill and draft
+you build reasons over the whole relationship instead of one inbox's fragment, from a file on your
+disk under a retention policy you wrote. It runs against a six-figure message archive, not a demo
+fixture.
 
 Four channels. One person. Zero egress.
 
