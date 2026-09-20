@@ -42,6 +42,8 @@ def nem(s):
     return s if "@" in s else ""
 
 def imsg_by_counterparty():
+    if not os.path.exists(SNAP):   # tolerated like calendar.db: an absent optional store is an empty channel
+        return {}
     """{norm_key: {last_unix,count,sent,recv}} over 1:1 chats, sent-inclusive."""
     c = sqlite3.connect("file:%s?mode=ro" % SNAP, uri=True)
     part = {}
@@ -71,9 +73,10 @@ def email_stats():
     c = sqlite3.connect("file:%s?mode=ro" % CONTACTS, uri=True)
     out = {}
     pf = CFG.col_of(c, "people", "person_file") or "NULL"
-    for e, sent, recv, first, last, person_file in c.execute(
-            "SELECT lower(email),sent,recv,first,last,%s FROM people" % pf):
-        out[e] = (sent or 0, recv or 0, last or 0, person_file or "", first or 0)
+    nm = CFG.col_of(c, "people", "name") or "NULL"
+    for e, sent, recv, first, last, person_file, name in c.execute(
+            "SELECT lower(email),sent,recv,first,last,%s,%s FROM people" % (pf, nm)):
+        out[e] = (sent or 0, recv or 0, last or 0, person_file or "", first or 0, name or "")
     c.close()
     return out
 
@@ -120,8 +123,7 @@ def main():
         persons.append((pid, name, em, ph))
     m.close()
 
-    rows = []
-    for pid, name, em, ph in persons:
+    def build_row(pid, name, em, ph):
         me = [es[e.lower()] for e in em if e.lower() in es]
         email_last = max([x[2] for x in me], default=0)
         email_sent = sum(x[0] for x in me)
@@ -146,14 +148,32 @@ def main():
         span_years = round((last - span_first) / (365.25 * 86400), 1) if (span_first and last) else 0.0
         chans = [c for c, n in (("email", email_count), ("imessage", imsg_count),
                                 ("calendar", cal_count)) if n]
-        rows.append({"id": pid, "name": name or "", "emails": " ".join(em), "phones": " ".join(ph),
+        return {"id": pid, "name": name or "", "emails": " ".join(em), "phones": " ".join(ph),
                      "person_file": person_file, "email_last": email_last, "email_count": email_count,
                      "email_sent": email_sent, "email_recv": email_recv, "email_first": email_first,
                      "imsg_last": imsg_last, "imsg_count": imsg_count, "imsg_sent": imsg_sent,
                      "imsg_recv": imsg_recv, "imsg_first": imsg_first,
                      "cal_last": cal_last, "cal_count": cal_count, "cal_first": cal_first,
                      "span_first": span_first, "span_years": span_years,
-                     "last_contact": last, "channels": "+".join(chans)})
+                     "last_contact": last, "channels": "+".join(chans)}
+
+    rows = [build_row(pid, name, em, ph) for pid, name, em, ph in persons]
+
+    # ── corpus seeding (spec exo-mesh R4–R8, R11): every two-way correspondent gets a row ────────
+    # Until this landed, identity was seeded from the address book ALONE — 16,318 persons, 16,318 rows —
+    # and two thirds of the people the owner actually corresponds with had no row (2026-09-13). A two-way
+    # address (sent AND received) that belongs to no address-book person becomes a singleton identity
+    # carrying name, stats and people-file from contacts.db. The owner's own addresses never do.
+    # Unconditional: the spec says one row per person, not one row per person if enabled. A rollout
+    # switch guarded this for one day (2026-09-19) while the owner's aliases went into config; deleted
+    # per ADR-0055 — a default-off switch must not linger.
+    claimed = {e.lower() for _, _, em, _ in persons for e in em}
+    self_set = {e.lower() for e in SELF_EMAILS}
+    singles = sorted(e for e, st in es.items()
+                     if '@' in e and st[0] > 0 and st[1] > 0 and e not in claimed and e not in self_set)
+    next_id = max([p[0] for p in persons], default=0) + 1
+    for i, e in enumerate(singles):
+        rows.append(build_row(next_id + i, (es[e][5] if len(es[e]) > 5 else "") or e, [e], []))
 
     unified = [r for r in rows if r["email_count"] > 0 and r["imsg_count"] > 0]
     imsg_any = [r for r in rows if r["imsg_count"] > 0]
@@ -177,6 +197,8 @@ def main():
 
     print(json.dumps({
         "identities": len(rows),
+        "seed_master": len(persons),
+        "seed_corpus": len(singles),
         "unified_email+imsg": len(unified),
         "prev_bridge": 79,
         "any_imessage": len(imsg_any),
