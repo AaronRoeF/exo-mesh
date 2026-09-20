@@ -165,6 +165,18 @@ a journal note yet.
 ### You want the mesh itself — `exo-mesh`
 The front door: the local-first join over mail, contacts, calendar and todos.
 
+### You are about to have an agent research what a query already knows — `exo-mesh since`
+`exo-mesh-since` is the window: who you interacted with since `--since` (one row per
+person, per-channel counts, a class that tells newsletters from humans), the meetings
+inside `--horizon` with attendees already resolved to identities, and the enrichment
+diff between what the mesh observed and what your person files claim. Deterministic,
+offline, read-only — it proposes, and never writes.
+
+```sh
+exo-mesh since --since 26h --include diff        # the cheap daily pass
+exo-mesh since --include meetings --horizon 3d   # who is in the room, resolved
+```
+
 ### You want calendar answers with the network off — `exo-cal pull-all`
 Refreshes the local calendar replica from Apple and both Google accounts, skipping any
 that are not authorised.

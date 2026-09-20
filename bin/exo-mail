@@ -728,6 +728,7 @@ def cmd_mcp(a):
       {"name":"reply_draft","annotations":{"readOnlyHint":False,"openWorldHint":True,"destructiveHint":False},"description":"Create a Gmail DRAFT reply (never sends).","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"body":{"type":"string"}},"required":["id","body"]}},
       {"name":"day","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"The unified day: today's meetings + next-7d, todos, mail headlines, journal status (local, one read).","inputSchema":{"type":"object","properties":{}}},
       {"name":"calendar","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"Search the local calendar replica (all 3 sources). query=title substring, days=upcoming window.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"days":{"type":"integer"},"limit":{"type":"integer"}}}},
+      {"name":"since","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"What changed in your relationships since a window: people interacted with (one row each, per-channel counts, class), meetings ahead with attendees resolved, and the computed enrichment diff.","inputSchema":{"type":"object","properties":{"since":{"type":"string"},"horizon":{"type":"string"},"include":{"type":"string"},"min_signal":{"type":"integer"}}}},
     ]
     def dispatch(name,args):
         a_=args or {}
@@ -740,6 +741,11 @@ def cmd_mcp(a):
         if name=="tag": return run(["tag",a_["id"],*a_["ops"]])
         if name=="reply_draft": return run(["reply",a_["id"],"-m",a_["body"]])
         if name=="day": return run_bin("exo-day",["--json"])
+        if name=="since":
+            xa=[]
+            for k,fl in (("since","--since"),("horizon","--horizon"),("include","--include"),("min_signal","--min-signal")):
+                if a_.get(k) is not None: xa+=[fl,str(a_[k])]
+            return run_bin("exo-mesh-since",xa)
         if name=="calendar":
             import sqlite3, time
             dbp=CFG.store_path("calendar.db")

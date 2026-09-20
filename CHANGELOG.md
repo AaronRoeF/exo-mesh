@@ -4,6 +4,10 @@ Releases of exo-mesh. Each entry names the source commit it was exported from.
 
 ---
 
+## [2026-09-20] — v0.3.0 — since: what changed in your relationships this week — new people, drifted people, meetings ahead — in one read; every meeting on your day arrives with who is in the room and where each relationship stands; the owner never becomes an identity through either seeding door
+- Source commit: 27acfc9
+
+
 ## [2026-09-19] — v0.2.1 — every MCP tool declares its effect class (readOnlyHint / openWorldHint) so a harness can wire its gates from the declaration; reply --dry-run names a reply's recipient without creating anything
 - Source commit: 101fe83
 

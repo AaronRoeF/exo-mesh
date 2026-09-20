@@ -117,8 +117,29 @@ def main():
     cal = cal_by_counterparty()
     m = sqlite3.connect("file:%s?mode=ro" % MASTER, uri=True)
     persons = []
+    self_set_master = {e.lower() for e in SELF_EMAILS}
+    self_skipped = 0
+    skipped_card_addrs = set()
     for pid, name, emails, phones in m.execute("SELECT id,name,emails,phones FROM master"):
         em = [x for x in (emails or "").split() if "@" in x]
+        # The owner's own address-book card (R7): a master person carrying ANY of the owner's
+        # addresses IS the owner, even when the card also carries other, non-self addresses from a
+        # different employer -- one master row is one person, so the whole card is excluded, not
+        # just the matching address. Mirrors the corpus pass's self_set exclusion below, at person
+        # granularity instead of address granularity (a master person owns several addresses at once;
+        # a corpus singleton is exactly one address).
+        if self_set_master and any(e.lower() in self_set_master for e in em):
+            self_skipped += 1
+            # WIDEN (2026-09-20): every address on an identified self-card is the owner's, not just
+            # the one(s) literally listed in EXO_MAIL_SELF_EMAILS -- a second employer address on the
+            # SAME card is still the owner. Without this, skipping the card only relocates the R7 bug:
+            # its unlisted addresses are no longer "claimed" by a master row, so the corpus pass (which
+            # only excludes the literal self_set) mints them as new singleton identities -- the owner
+            # becomes an identity through the corpus door instead of the address-book door. Collected
+            # here and unioned into the corpus pass's self_set below, so R7's SHALL holds through BOTH
+            # seeding paths, not just the one that happened to be checked first.
+            skipped_card_addrs.update(e.lower() for e in em)
+            continue
         ph = phones_of(phones)
         persons.append((pid, name, em, ph))
     m.close()
@@ -168,7 +189,7 @@ def main():
     # switch guarded this for one day (2026-09-19) while the owner's aliases went into config; deleted
     # per ADR-0055 — a default-off switch must not linger.
     claimed = {e.lower() for _, _, em, _ in persons for e in em}
-    self_set = {e.lower() for e in SELF_EMAILS}
+    self_set = {e.lower() for e in SELF_EMAILS} | skipped_card_addrs
     singles = sorted(e for e, st in es.items()
                      if '@' in e and st[0] > 0 and st[1] > 0 and e not in claimed and e not in self_set)
     next_id = max([p[0] for p in persons], default=0) + 1
@@ -199,6 +220,7 @@ def main():
         "identities": len(rows),
         "seed_master": len(persons),
         "seed_corpus": len(singles),
+        "self_skipped": self_skipped,
         "unified_email+imsg": len(unified),
         "prev_bridge": 79,
         "any_imessage": len(imsg_any),

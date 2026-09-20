@@ -116,6 +116,38 @@ whether today's dated note exists under `EXO_MAIL_NOTES`. It only reads.
 
 ---
 
+## Ask what changed in your relationships since a window
+
+```sh
+exo-mesh since                                  # last 7 days, all three sections
+exo-mesh since --since 26h --include diff       # just the enrichment candidates
+exo-mesh since --horizon 3d --include meetings  # meetings ahead, attendees resolved
+exo-mesh since --since 2026-09-01 --min-signal 2
+```
+
+`exo-mesh-since` answers the question an enrichment pass otherwise asks a model to
+research. Three sections:
+
+- **`people`** — everyone you interacted with inside `--since`, one row per person
+  across mail, iMessage and calendar, with per-channel counts for that window, the
+  mesh's current state, suppressed keys, a bedrock flag, and a `class` of
+  `correspondent` · `inbound-only` · `broadcast` · `automated`. Filtering cold senders
+  becomes a filter on `class` rather than a judgment call.
+- **`meetings`** — events between now and the end of `--horizon`, with attendees split
+  into `attendees_resolved` (matched to an identity, with state) and
+  `attendees_unresolved` (addresses the mesh has never seen — the only ones worth
+  researching).
+- **`diff`** — the enrichment candidate list, computed: `missing_file`,
+  `attribute_changed`, `attribute_missing`, `stale_file`, `ambiguous`. Every row
+  carries the observation that produced it, so a caller can show its work.
+
+It is deterministic, offline, and read-only: no model, no key, no network on the query
+path, and it writes nothing — not a person file, not a tag, not a store. A person file
+is your judgment; the mesh is derived evidence, and the diff reports the disagreement
+without ever ranking one above the other.
+
+---
+
 ## Answer calendar questions with the network off
 
 ```sh

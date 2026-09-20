@@ -2,26 +2,106 @@
 ''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
 """exo-day — the unified day surface (P7). One read across the local stores:
 calendar (calendar.db) + todos (Things SQLite) + mail (exo-mail brief) + journal
-(a dated markdown note). Read-only; composes, never writes. `--json` for agents.
+(a dated markdown note), plus who each of today's attendees is to you, resolved
+through the relationship mesh (mesh.db). Read-only; composes, never writes.
+`--json` for agents. Nothing here touches a calendar, an invite, or a network.
 """
-import os, sys, json, sqlite3, glob, subprocess, time, datetime
+import os, sys, json, re, sqlite3, glob, subprocess, time, datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import exomail_config as CFG
 
 CAL = CFG.store_path("calendar.db")
 EXO_MAIL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "exo-mail")
 JSON = "--json" in sys.argv
+# Above this, an invite is an all-hands and per-person context is noise, not context.
+# A constant rather than a setting: nothing needs a second value, and a switch that
+# lingers is a liability (ADR-0055).
+MAX_ATTENDEES = 8
 
 def cal_events():
     if not os.path.exists(CAL): return [], 0
     c = sqlite3.connect("file:%s?mode=ro" % CAL, uri=True)
     now = time.time(); eod = time.mktime(datetime.date.today().timetuple()) + 86400
-    today = [{"start": s, "title": t, "calendar": cal, "all_day": ad}
-             for s, t, cal, ad in c.execute(
-                 'SELECT start,title,calendar,all_day FROM events WHERE start>=? AND start<? AND title IS NOT NULL '
+    today = [{"start": s, "title": t, "calendar": cal, "all_day": ad, "attendees": at}
+             for s, t, cal, ad, at in c.execute(
+                 'SELECT start,title,calendar,all_day,attendees FROM events WHERE start>=? AND start<? AND title IS NOT NULL '
                  'AND (status IS NULL OR status!="cancelled") ORDER BY start', [now - 3600, eod])]
     week = c.execute("SELECT COUNT(*) FROM events WHERE start>=? AND start<?", [now, now + 7 * 86400]).fetchone()[0]
     c.close(); return today, week
+
+# ── the mesh in front of every meeting ───────────────────────────────────────────
+# Resolution is by ADDRESS only, never by name. A calendar attendee IS an address;
+# a fuzzy name match would let a substring hit attach the wrong person's history to
+# a meeting, and a wrong hit is worse than a blank.
+
+def _attendees(raw):
+    """The event's attendee addresses: lower-cased, de-duplicated, in order.
+    exo-cal stores them comma-joined (Google) or empty (Apple)."""
+    out = []
+    for a in (raw or "").split(","):
+        a = a.strip().lower()
+        if a and a not in out: out.append(a)
+    return out
+
+def _mesh_index():
+    """address → identity row, read ONCE. Beats calling a per-person resolver, which
+    re-scans every row each time. {} when there is no mesh yet, so a machine that has
+    never run exo-mesh-resolve still gets its day."""
+    mdb = CFG.store_path("mesh.db")
+    if not os.path.exists(mdb): return {}
+    con = sqlite3.connect("file:%s?mode=ro" % mdb, uri=True); con.row_factory = sqlite3.Row
+    try: rows = con.execute("SELECT * FROM identity ORDER BY id").fetchall()
+    except sqlite3.OperationalError: con.close(); return {}
+    con.close()
+    idx = {}
+    for r in rows:
+        for e in (r["emails"] or "").split():
+            e = e.strip().lower()
+            if e: idx.setdefault(e, r)   # first row wins, in id order: deterministic
+    return idx
+
+def _bedrock():
+    """(slugs, normalized names, readable) for people files carrying `bedrock: true`.
+    Twin of exo-mail's _bedrock_slugs — the two collapse when the prep surface is next
+    opened. An unreadable directory returns readable=False so an unknown is reported as
+    unknown, never as false."""
+    d = CFG.people_dir()
+    slugs, names = set(), set()
+    if not d or not os.path.isdir(d): return slugs, names, False
+    for fn in os.listdir(d):
+        if not fn.endswith(".md"): continue
+        try: head = open(os.path.join(d, fn), encoding="utf-8", errors="ignore").read(2000)
+        except OSError: continue
+        if re.search(r"^bedrock:\s*true\s*$", head, re.M):
+            slugs.add(fn[:-3].lower())
+            m = re.search(r"^name:\s*(.+?)\s*$", head, re.M)
+            names.add(" ".join(sorted(re.findall(r"[a-z0-9]+",
+                      (m.group(1) if m else fn[:-3].replace("-", " ")).lower()))))
+    names.discard("")
+    return slugs, names, True
+
+def _relationship(addr, idx, bed, now):
+    """One attendee, as a line of standing: who they are, how long since any channel
+    carried a word, which channel that was, and whether this is a designated
+    relationship. An address the mesh does not know is LISTED, not dropped — "no
+    history with this person" is itself the context this surface exists to give."""
+    slugs, bnames, readable = bed
+    r = idx.get(addr)
+    if r is None:
+        return {"email": addr, "name": addr, "known": False, "last_contact_days": None,
+                "freshest": None, "channels": [], "bedrock": (False if readable else None),
+                "person_file": None}
+    lc = r["last_contact"] or 0
+    fresh = None
+    for ch, val in (("email", r["email_last"]), ("imessage", r["imsg_last"]), ("calendar", r["cal_last"])):
+        if val and abs(val - lc) < 1.0: fresh = ch; break
+    pf = (CFG.row_get(r, "person_file") or "").lower()
+    norm = " ".join(sorted(re.findall(r"[a-z0-9]+", (r["name"] or "").lower())))
+    return {"email": addr, "name": r["name"] or addr, "known": True,
+            "last_contact_days": (int((now - lc) / 86400) if lc else None),
+            "freshest": fresh, "channels": (r["channels"].split("+") if r["channels"] else []),
+            "bedrock": (None if not readable else bool((pf and pf in slugs) or (norm and norm in bnames))),
+            "person_file": pf or None}
 
 def things_counts():
     g = glob.glob(os.path.expanduser("~/Library/Group Containers/*/ThingsData-*/Things Database.thingsdatabase/main.sqlite"))
@@ -57,9 +137,27 @@ def main():
     things = things_counts()
     mail = mail_brief()
     journ = journal_today()
+    now = time.time()
+    idx = bed = mine = None          # built lazily: an empty calendar pays nothing
+    meetings = []
+    for e in today:
+        m = {"time": datetime.datetime.fromtimestamp(e["start"]).strftime("%H:%M") if not e["all_day"] else "all-day",
+             "title": e["title"], "calendar": e["calendar"]}
+        atts = _attendees(e.get("attendees"))
+        if atts:
+            if mine is None: mine = CFG.self_emails()
+            # The cap counts OTHERS, not invitees: the work it bounds is per other
+            # person, so a meeting you attend renders its eight others rather than
+            # losing one slot to your own address.
+            others = [a for a in atts if a not in mine]
+            if len(others) > MAX_ATTENDEES:
+                m["relationships"] = "skipped (>%d attendees)" % MAX_ATTENDEES
+            else:
+                if idx is None: idx, bed = _mesh_index(), _bedrock()
+                m["relationships"] = [_relationship(a, idx, bed, now) for a in others]
+        meetings.append(m)
     data = {"date": datetime.date.today().isoformat(),
-            "meetings_today": [{"time": datetime.datetime.fromtimestamp(e["start"]).strftime("%H:%M") if not e["all_day"] else "all-day",
-                                "title": e["title"], "calendar": e["calendar"]} for e in today],
+            "meetings_today": meetings,
             "meetings_next_7d": week, "todos": things, "mail": mail, "journal_note_exists": journ}
     if JSON:
         print(json.dumps(data, indent=2)); return 0
@@ -68,6 +166,16 @@ def main():
     print("\nMEETINGS TODAY (%d) · %d in the next 7 days" % (len(today), week))
     for e in data["meetings_today"]:
         print("  %-7s %s%s" % (e["time"], e["title"][:52], "  ·%s" % e["calendar"] if e["calendar"] else ""))
+        rel = e.get("relationships")
+        if isinstance(rel, str):
+            print("          %s" % rel)
+        else:
+            for p in (rel or []):
+                if not p["known"]:
+                    print("          %s — no history" % p["name"][:40]); continue
+                when = "%dd" % p["last_contact_days"] if p["last_contact_days"] is not None else "never"
+                print("          %s%s — %s%s" % ("★ " if p["bedrock"] else "", p["name"][:40], when,
+                                                 " via %s" % p["freshest"] if p["freshest"] else ""))
     if not today: print("  (nothing on the calendar today)")
     if things:
         print("\nTODOS   today %s · inbox %s" % (things["today"], things["inbox"]))

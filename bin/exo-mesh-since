@@ -1,0 +1,672 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+"""exo-mesh-since — what changed in your relationships since a window.
+
+  exo-mesh since [--since 26h|7d|2026-09-01] [--horizon 3d] [--json]
+                 [--include people,meetings,diff] [--min-signal N]
+
+Three sections, all computed locally and offline:
+
+  people    everyone you interacted with inside --since, deduplicated to ONE row per
+            person across mail, iMessage and calendar, with per-channel counts for the
+            window, the mesh's current relationship state, any suppressed keys, a
+            bedrock flag, and a class: correspondent | inbound-only | broadcast |
+            automated.
+  meetings  events between now and the end of --horizon, with attendees split into
+            those resolved to an identity (carrying state) and those the mesh has never
+            seen — the genuinely cold ones, which is the only set worth researching.
+  diff      the enrichment candidate list, computed rather than researched:
+            missing_file | attribute_changed | attribute_missing | stale_file |
+            ambiguous, each carrying the observation that produced it.
+
+CONTRACT. Read-only: it writes no store, no tag, no person file. Deterministic: same
+stores in, same bytes out. Offline: the only process it launches is the local mail
+index, and it opens nothing but local files. It proposes; the callers keep their own
+write rails, and a person file is a human's judgment that this never ranks below the
+mesh's evidence.
+
+WHERE THE WINDOW COUNTS COME FROM. `identity` and the contacts store hold aggregates
+only — neither can answer "how many messages in THIS window". So mail counts come from
+the local mail index (two address queries per run), iMessage counts from the snapshot
+with the same counterparty join the resolve uses (chat_handle_join + chat_message_join,
+never `join handle`: sent messages carry handle_id=0), and calendar counts from the
+local replica. A channel whose source is absent is reported as null in `sources`, never
+silently zero. A store a REQUESTED section cannot be computed without is a hard
+NOTFOUND naming that store.
+
+Env: EXO_MAIL_STORE (the databases) · EXO_MAIL_PEOPLE (the person files) ·
+EXO_MAIL_SELF_EMAILS (your own addresses) — all resolved by exomail_config.
+"""
+import os, sys, re, json, time, sqlite3, subprocess
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import exomail_config as CFG
+
+NM = CFG.notmuch_bin()
+APPLE_EPOCH = 978307200
+STALE_DAYS = 60                      # the same threshold the people-file gate already warns at
+SECTIONS = ("people", "meetings", "diff")
+BROADCAST_BUCKETS = ("feed", "updates", "fins")
+PLACEHOLDERS = ("", "-", "?", "n/a", "na", "none", "null", "unknown", "tbd")
+EXIT = {"OK": 0, "USAGE": 1, "NOTFOUND": 2}
+# A shape, not a list of names: an address no human reads and no human answers.
+AUTOMATED = re.compile(r"^(no[-_.]?reply|do[-_.]?not[-_.]?reply|mailer[-_.]?daemon|postmaster|bounce[sd]?)([+._-].*)?$")
+DUR = re.compile(r"^(\d+)\s*([mhdw])$", re.I)
+UNIT = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
+ISO_DAY = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+PHONE = re.compile(r"\+?1?\s*\(?\d{3}\)?[\s.\-]*\d{3}[\s.\-]*\d{4}")
+
+
+# ----------------------------------------------------------------------------- envelope
+def out_err(code, msg, hint=""):
+    print(json.dumps({"ok": False, "error": msg, "code": code, "hint": hint, "retryable": False}))
+    return EXIT.get(code, 1)
+
+
+def out_ok(data, summary):
+    print(json.dumps({"ok": True, "data": data, "summary": summary}))
+    return 0
+
+
+# ----------------------------------------------------------------------------- normalizing
+def n10(s):
+    d = re.sub(r"\D", "", s or "")
+    return d[-10:] if len(d) >= 10 else ""
+
+
+def phones_of(s):
+    return [p for p in (n10(m) for m in PHONE.findall(s or "")) if p]
+
+
+def nem(s):
+    s = (s or "").strip().lower()
+    return s if "@" in s else ""
+
+
+def norm_name(s):
+    return " ".join(sorted(re.findall(r"[a-z0-9]+", (s or "").lower())))
+
+
+def iso(ts):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)) if ts else None
+
+
+def days_since(ts, now):
+    return int((now - ts) / 86400) if ts else None
+
+
+def parse_dur(s, flag):
+    m = DUR.match((s or "").strip())
+    if not m:
+        raise ValueError("%s: expected a duration like 26h, 7d or 2w — got %r" % (flag, s))
+    return int(m.group(1)) * UNIT[m.group(2).lower()]
+
+
+def parse_since(s, now):
+    """A duration back from now, or an ISO date meaning LOCAL midnight of that day."""
+    s = (s or "").strip()
+    m = ISO_DAY.match(s)
+    if m:
+        y, mo, d = (int(x) for x in m.groups())
+        return time.mktime((y, mo, d, 0, 0, 0, 0, 0, -1))
+    return now - parse_dur(s, "--since")
+
+
+# ----------------------------------------------------------------------------- evidence
+def nm_counts(output, query):
+    """{address: count} from the local mail index, or None when it cannot be read.
+    None means 'this channel had no source', which is reported, never rounded to zero."""
+    try:
+        r = subprocess.run([NM, "address", "--output=" + output, "--output=count", "--format=json", query], capture_output=True, text=True, timeout=180)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        rows = json.loads(r.stdout or "[]")
+    except ValueError:
+        return None
+    out = {}
+    for x in rows:
+        a = nem(x.get("address"))
+        if a:
+            out[a] = out.get(a, 0) + int(x.get("count") or 0)
+    return out
+
+
+def mail_window(lo, hi, selves):
+    """(received, sent, broadcast_addresses) inside the window, or (None, None, set())."""
+    win = "date:@%d..@%d" % (int(lo), int(hi))
+    me = " or ".join("from:%s" % e for e in sorted(selves))
+    recv = nm_counts("sender", ("%s and not (%s)" % (win, me)) if me else win)
+    if recv is None:
+        return None, None, set()
+    sent = nm_counts("recipients", "%s and (%s)" % (win, me)) if me else {}
+    tags = " or ".join("tag:exo/%s" % b for b in BROADCAST_BUCKETS)
+    bcast = nm_counts("sender", "%s and (%s)" % (win, tags))
+    return recv, (sent or {}), set(bcast or {})
+
+
+def imsg_window(path, lo, hi):
+    """{counterparty_key: {count, sent, recv}} over 1:1 chats inside the window."""
+    if not os.path.exists(path):
+        return None
+    con = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    part = {}
+    try:
+        for cid, hid in con.execute("SELECT chj.chat_id, h.id FROM chat_handle_join chj JOIN handle h ON h.ROWID=chj.handle_id"):
+            part.setdefault(cid, set()).add(hid)
+        one = dict((cid, next(iter(hs))) for cid, hs in part.items() if len(hs) == 1)
+        lo_ns = int((lo - APPLE_EPOCH) * 1e9)
+        hi_ns = int((hi - APPLE_EPOCH) * 1e9)
+        agg = {}
+        for cid, fromme in con.execute(
+                "SELECT cmj.chat_id, m.is_from_me FROM message m JOIN chat_message_join cmj ON cmj.message_id=m.ROWID "
+                "WHERE m.date BETWEEN ? AND ?", (lo_ns, hi_ns)):
+            h = one.get(cid)
+            if not h:
+                continue
+            k = n10(h) or nem(h)
+            if not k:
+                continue
+            a = agg.setdefault(k, {"count": 0, "sent": 0, "recv": 0})
+            a["count"] += 1
+            a["sent" if fromme else "recv"] += 1
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        con.close()
+    return agg
+
+
+def cal_window(path, lo, hi, selves):
+    """{address: count} over events that already happened inside the window."""
+    if not os.path.exists(path):
+        return None
+    con = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    agg = {}
+    try:
+        for att, org, start in con.execute('SELECT attendees, organizer, start FROM events WHERE start BETWEEN ? AND ?', (lo, hi)):
+            who = set(nem(e) for e in (att or "").split(",") if "@" in e)
+            o = nem(org)
+            if o:
+                who.add(o)
+            for e in (who - selves):
+                if e:
+                    agg[e] = agg.get(e, 0) + 1
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        con.close()
+    return agg
+
+
+def cal_ahead(path, lo, hi, selves):
+    """Events whose start lies between now and the end of the horizon. Past-only events
+    are excluded by the bound itself, not by a filter that can be forgotten."""
+    con = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    out = []
+    try:
+        for uid, src, cal, title, start, att, org in con.execute(
+                'SELECT uid, source, calendar, title, start, attendees, organizer FROM events '
+                'WHERE start >= ? AND start <= ? ORDER BY start, uid', (lo, hi)):
+            who = [nem(e) for e in (att or "").split(",") if "@" in e]
+            o = nem(org)
+            if o and o not in who:
+                who.append(o)
+            out.append({"uid": uid, "source": src, "calendar": cal, "title": title,
+                        "start": start, "who": [w for w in who if w and w not in selves]})
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        con.close()
+    return out
+
+
+# ----------------------------------------------------------------------------- the mesh
+def load_identities(path):
+    con = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        rows = con.execute("SELECT * FROM identity").fetchall()
+    except sqlite3.OperationalError:
+        con.close()
+        return None
+    con.close()
+    out = []
+    for r in rows:
+        out.append({
+            "id": r["id"], "name": r["name"] or "",
+            "emails": [e for e in (r["emails"] or "").split() if "@" in e],
+            "phones": [p for p in (r["phones"] or "").split() if p],
+            "person_file": CFG.row_get(r, "person_file") or "",
+            "email_last": r["email_last"] or 0, "email_count": r["email_count"] or 0,
+            "email_sent": r["email_sent"] or 0, "email_recv": r["email_recv"] or 0,
+            "imsg_last": r["imsg_last"] or 0, "imsg_count": r["imsg_count"] or 0,
+            "imsg_sent": r["imsg_sent"] or 0, "imsg_recv": r["imsg_recv"] or 0,
+            "cal_last": r["cal_last"] or 0, "cal_count": r["cal_count"] or 0,
+            "span_years": r["span_years"] or 0.0, "last_contact": r["last_contact"] or 0,
+            "channels": r["channels"] or ""})
+    return out
+
+
+def address_recency(path):
+    """{address: last_seen_unix} from the contacts store — how 'freshest address' is decided."""
+    if not os.path.exists(path):
+        return {}
+    con = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    out = {}
+    try:
+        for e, last in con.execute("SELECT lower(email), last FROM people"):
+            if e and "@" in e:
+                out[e] = last or 0
+    except sqlite3.OperationalError:
+        pass
+    con.close()
+    return out
+
+
+def suppressed_keys(path):
+    keys = set()
+    if not os.path.exists(path):
+        return keys
+    for ln in open(path, encoding="utf-8", errors="ignore"):
+        ln = ln.rstrip("\n")
+        if not ln or ln.startswith("#"):
+            continue
+        p = ln.split("\t")
+        if len(p) >= 2 and p[1].strip() in ("drift", "all"):
+            keys.add(p[0].strip().lower())
+    return keys
+
+
+def pinned_broadcast(path):
+    """Senders an allow rule pins to a newsletter bucket. The rule file is in the store, so
+    this half of the class is readable with no mail index at all."""
+    pats = []
+    if not os.path.exists(path):
+        return pats
+    for ln in open(path, encoding="utf-8", errors="ignore"):
+        ln = ln.rstrip("\n")
+        if not ln or ln.startswith("#"):
+            continue
+        p = ln.split("\t")
+        if len(p) >= 3 and p[1].strip() in BROADCAST_BUCKETS and p[2].strip() == "allow":
+            pats.append(p[0].strip().lower())
+    return pats
+
+
+# ----------------------------------------------------------------------------- person files
+def load_person_files(d):
+    """[{slug, name, email, work_email, mobile, phone, org, title, last_updated, bedrock}]"""
+    out = []
+    if not d or not os.path.isdir(d):
+        return None
+    for fn in sorted(os.listdir(d)):
+        if not fn.endswith(".md"):
+            continue
+        try:
+            head = open(os.path.join(d, fn), encoding="utf-8", errors="ignore").read(4000)
+        except OSError:
+            continue
+        fm = {}
+        if head.startswith("---"):
+            body = head.split("---", 2)
+            block = body[1] if len(body) > 2 else ""
+            for ln in block.splitlines():
+                k, sep, v = ln.partition(":")
+                if sep and k.strip() and not k.startswith((" ", "\t", "-")):
+                    fm[k.strip().lower()] = v.strip().strip('"').strip("'")
+        fm["slug"] = fn[:-3]
+        out.append(fm)
+    return out
+
+
+def is_placeholder(v):
+    return (v or "").strip().lower() in PLACEHOLDERS
+
+
+# ----------------------------------------------------------------------------- assembly
+def build_people(ident, by_key, recv, sent, imsgw, calw, selves, sup, pins, bcast_addrs,
+                 bedrock_slugs, bedrock_names, people_readable, now, min_signal):
+    ev = {}
+
+    def bump(k, ch, n, direction):
+        if not k or k in selves:
+            return
+        a = ev.setdefault(k, {"email": 0, "imsg": 0, "cal": 0, "sent": 0, "recv": 0})
+        a[ch] += n
+        a[direction] += n
+
+    for a, c in (recv or {}).items():
+        bump(a, "email", c, "recv")
+    for a, c in (sent or {}).items():
+        bump(a, "email", c, "sent")
+    for k, v in (imsgw or {}).items():
+        if v["sent"]:
+            bump(k, "imsg", v["sent"], "sent")
+        if v["recv"]:
+            bump(k, "imsg", v["recv"], "recv")
+    for a, c in (calw or {}).items():
+        bump(a, "cal", c, "recv")
+
+    groups = {}
+    for k, v in ev.items():
+        i = by_key.get(k)
+        gid = ("id", i) if i is not None else ("key", k)
+        g = groups.setdefault(gid, {"keys": [], "email": 0, "imsg": 0, "cal": 0, "sent": 0, "recv": 0})
+        g["keys"].append(k)
+        for f in ("email", "imsg", "cal", "sent", "recv"):
+            g[f] += v[f]
+
+    rows = []
+    for gid, g in groups.items():
+        total_window = g["email"] + g["imsg"] + g["cal"]
+        if total_window < min_signal:
+            continue
+        if gid[0] == "id":
+            p = ident[gid[1]]
+            emails, phones, name = p["emails"], p["phones"], p["name"]
+            pf = p["person_file"] or None
+            fresh = max([("email", p["email_last"]), ("imessage", p["imsg_last"]),
+                         ("calendar", p["cal_last"])], key=lambda t: t[1])
+            total = p["email_count"] + p["imsg_count"]
+            s, rv = p["email_sent"] + p["imsg_sent"], p["email_recv"] + p["imsg_recv"]
+            state = {"last_contact_days": days_since(p["last_contact"], now),
+                     "freshest": fresh[0] if fresh[1] else None,
+                     "channels": p["channels"] or None,
+                     "initiates": ("you" if s > rv else "them") if total else None,
+                     "span_years": p["span_years"], "total": total}
+            two_way = (p["email_sent"] > 0 and p["email_recv"] > 0) or (p["imsg_sent"] > 0 and p["imsg_recv"] > 0)
+            ident_id = p["id"]
+        else:
+            emails = [k for k in g["keys"] if "@" in k]
+            phones = [k for k in g["keys"] if "@" not in k]
+            name = ""
+            pf = None
+            chans = "+".join(c for c, n in (("email", g["email"]), ("imessage", g["imsg"]),
+                                            ("calendar", g["cal"])) if n)
+            state = {"last_contact_days": None, "freshest": None, "channels": chans or None,
+                     "initiates": ("you" if g["sent"] > g["recv"] else "them"),
+                     "span_years": None, "total": None}
+            two_way = g["sent"] > 0 and g["recv"] > 0
+            ident_id = None
+        owned = set(e.lower() for e in emails) | set(phones)
+        low = sorted(owned)
+        automated = any(AUTOMATED.match(e.split("@", 1)[0]) for e in owned if "@" in e)
+        pinned = any(any(pat in e for e in owned) for pat in pins) or bool(owned & bcast_addrs)
+        if automated:
+            klass = "automated"
+        elif two_way:
+            klass = "correspondent"
+        elif pinned:
+            klass = "broadcast"
+        else:
+            klass = "inbound-only"
+        nn = norm_name(name)
+        bed = None if not people_readable else bool(
+            ((pf or "").lower() in bedrock_slugs) or (nn and nn in bedrock_names))
+        rows.append({"identity_id": ident_id, "name": name or (low[0] if low else ""),
+                     "emails": emails, "phones": phones, "person_file": pf,
+                     "in_window": {"email": g["email"], "imsg": g["imsg"], "cal": g["cal"]},
+                     "state": state, "bedrock": bed, "class": klass,
+                     "suppressed_keys": sorted(owned & sup),
+                     "_gid": gid, "_window_total": total_window,
+                     "_sent": g["sent"], "_recv": g["recv"]})
+    rows.sort(key=lambda r: (-r["_window_total"], (r["name"] or "").lower(),
+                             (r["emails"] or [""])[0]))
+    return rows
+
+
+def freshest_address(emails, recency, windowed):
+    """The owned address the mesh saw most recently. Ties break on window activity, then
+    lexicographically — so two runs never disagree."""
+    if not emails:
+        return None
+    return sorted(emails, key=lambda e: (-(recency.get(e.lower(), 0) or 0),
+                                         -(windowed.get(e.lower(), 0) or 0), e.lower()))[0]
+
+
+def match_person_files(row, files):
+    """(candidates, tier) — first tier that matches wins, and two matches at that tier is
+    an ambiguity to report, never a coin flip."""
+    owned = set(e.lower() for e in row["emails"])
+    ph = set(row["phones"])
+    pf = (row["person_file"] or "").lower()
+    if pf:
+        c = [f for f in files if f["slug"].lower() == pf]
+        if c:
+            return c, "the mesh link"
+    nn = norm_name(row["name"])
+    if nn:
+        c = [f for f in files if norm_name(f.get("name") or f["slug"].replace("-", " ")) == nn]
+        if c:
+            return c, "name"
+    if owned:
+        c = [f for f in files
+             if set(x for x in (nem(f.get("email")), nem(f.get("work_email"))) if x) & owned]
+        if c:
+            return c, "address"
+    if ph:
+        c = [f for f in files
+             if set(x for x in (n10(f.get("mobile")), n10(f.get("phone"))) if x) & ph]
+        if c:
+            return c, "phone"
+    return [], None
+
+
+def build_diff(rows, files, recency, windowed, now):
+    out = []
+    for row in rows:
+        if row["class"] in ("automated", "broadcast"):
+            continue
+        cands, tier = match_person_files(row, files)
+        if len(cands) > 1:
+            out.append({"identity_id": row["identity_id"], "person_file": None,
+                        "kind": "ambiguous", "name": row["name"],
+                        "candidates": sorted(f["slug"] for f in cands),
+                        "evidence": "%d person files match by %s" % (len(cands), tier)})
+            continue
+        if not cands:
+            if row["class"] == "correspondent":
+                # Two shapes reach here and they do NOT mean the same thing: an identity knows its
+                # lifetime totals, a window-only correspondent has no mesh row to ask. Say which.
+                if row["identity_id"] is not None:
+                    ev = "%d exchanges, span %sy, two-way" % (row["state"]["total"] or 0,
+                                                              row["state"]["span_years"])
+                else:
+                    ev = "%d exchanges in the window, two-way, no identity row yet" % row["_window_total"]
+                out.append({"identity_id": row["identity_id"], "person_file": None,
+                            "kind": "missing_file", "name": row["name"], "evidence": ev})
+            continue
+        f = cands[0]
+        slug = f["slug"]
+        mesh_email = freshest_address(row["emails"], recency, windowed)
+        mesh_phone = row["phones"][0] if row["phones"] else None
+        for field, file_raw, mesh_val in (("email", f.get("email"), mesh_email),
+                                          ("mobile", f.get("mobile") or f.get("phone"), mesh_phone)):
+            if not mesh_val:
+                continue
+            same = (nem(file_raw) == mesh_val) if field == "email" else (n10(file_raw) == mesh_val)
+            if is_placeholder(file_raw):
+                out.append({"identity_id": row["identity_id"], "person_file": slug,
+                            "kind": "attribute_missing", "field": field,
+                            "file_says": None, "mesh_says": mesh_val,
+                            "evidence": "the mesh has %s and the file carries no value" % mesh_val})
+            elif not same:
+                n = windowed.get((mesh_val or "").lower(), 0) if field == "email" else 0
+                ev = ("%d message(s) in window on %s" % (n, mesh_val)) if n else (
+                    "freshest of the %d address(es) the mesh owns" % len(row["emails"]))
+                out.append({"identity_id": row["identity_id"], "person_file": slug,
+                            "kind": "attribute_changed", "field": field,
+                            "file_says": (file_raw or "").strip(), "mesh_says": mesh_val,
+                            "evidence": ev})
+        lu = (f.get("last_updated") or "").strip()
+        m = ISO_DAY.match(lu)
+        if m:
+            age = int((now - time.mktime((int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                                          0, 0, 0, 0, 0, -1))) / 86400)
+            if age > STALE_DAYS:
+                out.append({"identity_id": row["identity_id"], "person_file": slug,
+                            "kind": "stale_file", "field": "last_updated",
+                            "file_says": lu, "mesh_says": None,
+                            "evidence": "last touched %d days ago while interactions continued" % age})
+    out.sort(key=lambda r: (str(r.get("person_file") or ""), r["kind"],
+                            str(r.get("field") or r.get("name") or "")))
+    return out
+
+
+def build_meetings(events, by_key, ident, now):
+    out = []
+    for e in events:
+        res, unres = [], []
+        for a in e["who"]:
+            i = by_key.get(a)
+            if i is None:
+                unres.append(a)
+                continue
+            p = ident[i]
+            fresh = max([("email", p["email_last"]), ("imessage", p["imsg_last"]),
+                         ("calendar", p["cal_last"])], key=lambda t: t[1])
+            res.append({"identity_id": p["id"], "name": p["name"],
+                        "person_file": p["person_file"] or None,
+                        "state": {"last_contact_days": days_since(p["last_contact"], now),
+                                  "freshest": fresh[0] if fresh[1] else None}})
+        res.sort(key=lambda r: ((r["name"] or "").lower(), r["identity_id"]))
+        out.append({"uid": e["uid"], "title": e["title"], "start": iso(e["start"]),
+                    "calendar": e["calendar"], "source": e["source"],
+                    "attendees_resolved": res, "attendees_unresolved": sorted(set(unres))})
+    return out
+
+
+# ----------------------------------------------------------------------------- main
+# Spelled out rather than sliced out of the module docstring: the polyglot header's exec line IS a
+# string literal, so it takes the `__doc__` slot and the prose below it does not. A help flag that
+# raises IndexError is worse than no help flag at all.
+USAGE = ("exo-mesh since [--since 26h|7d|2026-09-01] [--horizon 3d] [--json]\n"
+         "               [--include people,meetings,diff] [--min-signal N]\n"
+         "\n"
+         "  --since       lookback for interactions. A duration or an ISO date. Default 7d.\n"
+         "  --horizon     lookforward for meetings. A duration. Default 3d.\n"
+         "  --include     which sections to compute: people, meetings, diff. Default all three.\n"
+         "  --min-signal  drop anyone below N interactions in the window. Default 1.\n"
+         "  --json        accepted for symmetry; the output is always the JSON envelope.")
+
+
+def usage():
+    print(USAGE)
+    return EXIT["OK"]
+
+
+def main(argv):
+    args = {"since": "7d", "horizon": "3d", "include": ",".join(SECTIONS), "min-signal": "1"}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            return usage()
+        if a == "--json":
+            i += 1
+            continue
+        if a.startswith("--") and a[2:] in args:
+            if i + 1 >= len(argv):
+                return out_err("USAGE", "%s needs a value" % a, "exo-mesh since --help")
+            args[a[2:]] = argv[i + 1]
+            i += 2
+            continue
+        return out_err("USAGE", "unknown argument: %s" % a, "exo-mesh since --help")
+    want = [s.strip() for s in args["include"].split(",") if s.strip()]
+    bad = [s for s in want if s not in SECTIONS]
+    if bad or not want:
+        return out_err("USAGE", "--include names no section I compute: %s" % (", ".join(bad) or "(empty)"),
+                       "choose from %s" % ", ".join(SECTIONS))
+    try:
+        min_signal = int(args["min-signal"])
+        now = time.time()
+        since_ts = parse_since(args["since"], now)
+        horizon_end = now + parse_dur(args["horizon"], "--horizon")
+    except ValueError as e:
+        return out_err("USAGE", str(e), "durations are like 26h, 7d, 2w; dates are YYYY-MM-DD")
+    if since_ts > now:
+        return out_err("USAGE", "--since %s is in the future" % args["since"], "a window looks backwards")
+
+    MESHDB = CFG.store_path("mesh.db")
+    CAL = CFG.store_path("calendar.db")
+    SNAP = CFG.store_path("imessage", "snapshot.db")
+    CDB = CFG.store_path("contacts.db")
+    needs_mesh = ("people" in want) or ("diff" in want)
+    if needs_mesh and not os.path.exists(MESHDB):
+        return out_err("NOTFOUND", "no mesh at %s" % MESHDB, "run exo-mesh-resolve")
+    if "meetings" in want and not os.path.exists(CAL):
+        return out_err("NOTFOUND", "no calendar at %s" % CAL, "run exo-cal sync")
+
+    selves = set(e.lower() for e in CFG.self_emails())
+    ident = load_identities(MESHDB) if needs_mesh else []
+    if ident is None:
+        return out_err("NOTFOUND", "no identity table in %s" % MESHDB, "run exo-mesh-resolve")
+    by_key = {}
+    for idx, p in enumerate(ident):
+        for k in [e.lower() for e in p["emails"]] + p["phones"]:
+            by_key.setdefault(k, idx)
+
+    data = {"window": {"since": iso(since_ts), "now": iso(now), "horizon_end": iso(horizon_end)}}
+    counts = {}
+    people_rows = []
+    sources = {"mesh": MESHDB if needs_mesh else None, "email": None,
+               "imessage": None, "calendar": None}
+
+    if needs_mesh:
+        recv, sent, bcast_addrs = mail_window(since_ts, now, selves)
+        sources["email"] = CFG.mail_root() if recv is not None else None
+        imsgw = imsg_window(SNAP, since_ts, now)
+        sources["imessage"] = SNAP if imsgw is not None else None
+        calw = cal_window(CAL, since_ts, now, selves)
+        sources["calendar"] = CAL if calw is not None else None
+        pdir = CFG.people_dir()
+        files = load_person_files(pdir)
+        people_readable = files is not None
+        bedrock_slugs = set()
+        bedrock_names = set()
+        for f in (files or []):
+            if (f.get("bedrock") or "").strip().lower() == "true":
+                bedrock_slugs.add(f["slug"].lower())
+                bedrock_names.add(norm_name(f.get("name") or f["slug"].replace("-", " ")))
+        bedrock_names.discard("")
+        people_rows = build_people(ident, by_key, recv, sent, imsgw, calw, selves,
+                                   suppressed_keys(CFG.store_path("mesh-suppress.tsv")),
+                                   pinned_broadcast(CFG.store_path("sender-rules.tsv")),
+                                   bcast_addrs, bedrock_slugs, bedrock_names, people_readable,
+                                   now, min_signal)
+        windowed = {}
+        for src in (recv or {}), (sent or {}):
+            for a, c in src.items():
+                windowed[a] = windowed.get(a, 0) + c
+        if "people" in want:
+            data["people"] = [dict((k, v) for k, v in r.items() if not k.startswith("_"))
+                              for r in people_rows]
+            counts["people"] = "%d people" % len(people_rows)
+        if "diff" in want:
+            data["diff"] = build_diff(people_rows, files or [], address_recency(CDB), windowed, now)
+            counts["diff"] = "%d enrichment candidates" % len(data["diff"])
+
+    if "meetings" in want:
+        ahead = cal_ahead(CAL, now, horizon_end, selves)
+        if ahead is None:
+            return out_err("NOTFOUND", "no events table in %s" % CAL, "run exo-cal sync")
+        sources["calendar"] = CAL
+        if not ident and os.path.exists(MESHDB):
+            ident = load_identities(MESHDB) or []
+            sources["mesh"] = MESHDB
+            for idx, p in enumerate(ident):
+                for k in [e.lower() for e in p["emails"]] + p["phones"]:
+                    by_key.setdefault(k, idx)
+        data["meetings"] = build_meetings(ahead, by_key, ident, now)
+        counts["meetings"] = "%d meetings" % len(data["meetings"])
+
+    data["sources"] = sources
+    bits = [counts[s] for s in SECTIONS if s in counts]
+    return out_ok(data, "window %s: %s" % (args["since"], ", ".join(bits) or "nothing asked for"))
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

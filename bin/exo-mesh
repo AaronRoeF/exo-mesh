@@ -12,9 +12,15 @@ import exomail_config as CFG
 BIN = os.path.dirname(os.path.abspath(__file__))
 a = sys.argv[1:]
 
+# `since` is the mesh's own subcommand — the deterministic window every enrichment pass
+# was re-deriving by hand. Dispatched, not reimplemented: the launcher stays a launcher.
+if a and a[0] == "since":
+    sys.exit(subprocess.run([os.path.join(BIN, "exo-mesh-since"), *a[1:]]).returncode)
+
 if a and a[0] in ("caps", "capabilities", "help", "-h", "--help"):
     print("exo-mesh — one mesh over mail · contacts · calendar · todos\n")
     print("  exo-mesh                     your whole day, one local read (= exo-day)")
+    print("  exo-mesh since --since 7d    what changed in your relationships in a window")
     print("  exo-mail brief               the reply queue + drifting relationships")
     print("  exo-mail box imbox           real correspondence, newsletters filtered")
     print("  exo-mail contact show <name> one whole person across all addresses")

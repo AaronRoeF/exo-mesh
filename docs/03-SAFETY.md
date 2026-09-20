@@ -21,9 +21,10 @@ endpoint and stop. A human opens Gmail and presses Send.
 
 The same is true of destructive Gmail verbs: nothing in this repository calls
 `messages.trash`, `messages.delete`, or sets `SPAM`. The MCP server
-(`exo-mail mcp`) serves nine tools — `search`, `semantic`, `box`, `thread`,
-`contact`, `tag`, `reply_draft`, `day`, `calendar` — and that list is the whole
-surface.
+(`exo-mail mcp`) serves ten tools — `search`, `semantic`, `box`, `thread`,
+`contact`, `tag`, `reply_draft`, `day`, `calendar`, `since` — and that list is the
+whole surface. Every one of them declares its effect class in MCP `annotations`;
+only `tag` and `reply_draft` are not read-only.
 
 If you are reading this to decide whether to point an autonomous agent at it: the
 worst an agent can do with the full surface is retag your mail, create Gmail labels,
@@ -87,6 +88,18 @@ outside the `exo/` prefix.
 `exo-mesh-bedrock-apply` never clobbers: on an existing person file it inserts
 frontmatter keys and appends one interaction line. It creates a file only where none
 exists.
+
+`exo-mesh-since` reads the same person files and writes **none** of them. It reports
+where a file and the mesh disagree and stops there: the row carries both values and
+the observation behind it, and nothing in its output is an instruction. Deciding
+whether a surfaced change should be applied is the caller's judgment, and applying it
+is `exo-mesh-bedrock-apply`'s gated job or yours.
+
+One nuance worth stating rather than hiding: `imessage/snapshot.db` is kept in SQLite's
+write-ahead journal mode, so opening it — read-only, like every reader here — makes
+SQLite create `snapshot.db-shm` and `snapshot.db-wal` beside it when they are absent.
+Beside a live store they already exist and nothing new appears. No reader changes a
+byte of the databases themselves, and none of them creates a file of its own.
 
 ---
 
