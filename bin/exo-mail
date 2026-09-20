@@ -2,7 +2,7 @@
 ''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
 """exo-mail — agent-facing CLI over the local Gmail replica (notmuch).
 JSON envelope when piped/--json, styled on TTY, typed exit codes.
-Reads/tags only; send/spam/trash live behind mcp__exo-mail__* by design."""
+Reads, tags and Gmail DRAFTS only; nothing here sends, marks spam or trashes — a standing requirement, not a phase."""
 import sys, os, json, subprocess, argparse, re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import exomail_config as CFG
@@ -488,6 +488,11 @@ def cmd_reply(a):
     mid=str(h.get("Message-ID") or ""); refs=str(h.get("References") or "")+" "+mid
     import email.utils as _eu
     _n,_e=_eu.parseaddr(frm)
+    if a.dry_run:
+        # The gate layer asks this before allowing a draft: who would it go to? Same resolution as the
+        # real path, stopped here — no body, no Gmail API call, nothing written.
+        return out_ok({"account":acct,"to":frm,"subject":subj},"dry run — no draft created, no API call",a.json)
+    if not a.m: return out_err("USAGE","-m body is required (or --dry-run to only name the recipient)")
     body=_context_block(acct,_e,_n)+a.m
     try: tgid=_gapi(acct,"messages/%s?format=minimal&fields=threadId"%gid).get("threadId",gid)
     except Exception: tgid=gid
@@ -700,8 +705,10 @@ def cmd_storage_wrap(a): return cmd_storage(a)
 
 def cmd_mcp(a):
     """Minimal stdio JSON-RPC MCP server exposing safe exo-mail tools.
-    Irreversible verbs (send/spam/trash) are intentionally NOT served here yet;
-    they get added behind the gated mcp__exo-mail__* matcher in Phase 5."""
+    Irreversible verbs (send/spam/trash) are NOT served — a standing requirement; adding one is a
+    spec change, not a flag. Every tool declares its effect class in MCP `annotations`
+    (readOnlyHint / openWorldHint) so a harness can wire its gates from the declaration; the exo
+    suite cross-checks the wiring against these."""
     SELF=os.path.abspath(sys.argv[0])
     def run(args):
         r=subprocess.run([SELF,*args,"--json"],capture_output=True,text=True)
@@ -712,15 +719,15 @@ def cmd_mcp(a):
         try: return json.loads(r.stdout)
         except Exception: return {"ok":False,"error":(r.stdout or r.stderr)[:400]}
     TOOLS=[
-      {"name":"search","description":"Keyword search over the local mail replica (notmuch query).","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"account":{"type":"string","enum":ACCOUNTS+["all"]},"limit":{"type":"integer"}},"required":["query"]}},
-      {"name":"semantic","description":"Meaning-based search across every mailbox (local embeddings).","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"account":{"type":"string"},"since":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]}},
-      {"name":"box","description":"List a box: imbox|feed|fins|paper-trail|reply-later.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"account":{"type":"string"},"limit":{"type":"integer"}},"required":["name"]}},
-      {"name":"thread","description":"Read a thread as markdown by thread id.","inputSchema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}},
-      {"name":"contact","description":"Relationship mesh: action=list|show|search|drift, target=name/email.","inputSchema":{"type":"object","properties":{"action":{"type":"string"},"target":{"type":"string"},"days":{"type":"integer"}},"required":["action"]}},
-      {"name":"tag","description":"Add/remove notmuch tags on a message (exo/* namespace).","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"ops":{"type":"array","items":{"type":"string"}}},"required":["id","ops"]}},
-      {"name":"reply_draft","description":"Create a Gmail DRAFT reply (never sends).","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"body":{"type":"string"}},"required":["id","body"]}},
-      {"name":"day","description":"The unified day: today's meetings + next-7d, todos, mail headlines, journal status (local, one read).","inputSchema":{"type":"object","properties":{}}},
-      {"name":"calendar","description":"Search the local calendar replica (all 3 sources). query=title substring, days=upcoming window.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"days":{"type":"integer"},"limit":{"type":"integer"}}}},
+      {"name":"search","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"Keyword search over the local mail replica (notmuch query).","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"account":{"type":"string","enum":ACCOUNTS+["all"]},"limit":{"type":"integer"}},"required":["query"]}},
+      {"name":"semantic","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"Meaning-based search across every mailbox (local embeddings).","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"account":{"type":"string"},"since":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]}},
+      {"name":"box","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"List a box: imbox|feed|fins|paper-trail|reply-later.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"account":{"type":"string"},"limit":{"type":"integer"}},"required":["name"]}},
+      {"name":"thread","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"Read a thread as markdown by thread id.","inputSchema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}},
+      {"name":"contact","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"Relationship mesh: action=list|show|search|drift, target=name/email.","inputSchema":{"type":"object","properties":{"action":{"type":"string"},"target":{"type":"string"},"days":{"type":"integer"}},"required":["action"]}},
+      {"name":"tag","annotations":{"readOnlyHint":False,"openWorldHint":False},"description":"Add/remove notmuch tags on a message (exo/* namespace).","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"ops":{"type":"array","items":{"type":"string"}}},"required":["id","ops"]}},
+      {"name":"reply_draft","annotations":{"readOnlyHint":False,"openWorldHint":True,"destructiveHint":False},"description":"Create a Gmail DRAFT reply (never sends).","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"body":{"type":"string"}},"required":["id","body"]}},
+      {"name":"day","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"The unified day: today's meetings + next-7d, todos, mail headlines, journal status (local, one read).","inputSchema":{"type":"object","properties":{}}},
+      {"name":"calendar","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"Search the local calendar replica (all 3 sources). query=title substring, days=upcoming window.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"days":{"type":"integer"},"limit":{"type":"integer"}}}},
     ]
     def dispatch(name,args):
         a_=args or {}
@@ -929,7 +936,7 @@ def main():
         sp.set_defaults(fn=fn)
     sem=sub.add_parser("semantic",parents=[common], help="find it when you remember the gist but not the words"); sem.add_argument("query"); sem.add_argument("--since"); sem.set_defaults(fn=cmd_semantic)
     co=sub.add_parser("contact",parents=[common], help="see where a relationship stands across every channel (list/show/search/drift)"); co.add_argument("action",choices=["list","show","search","drift"]); co.add_argument("target",nargs="?"); co.add_argument("--days",type=int,default=90); co.set_defaults(fn=cmd_contact)
-    r=sub.add_parser("reply",parents=[common], help="reply in-thread with the context you would otherwise go hunting for"); r.add_argument("id"); r.add_argument("-m",required=True); r.set_defaults(fn=cmd_reply)
+    r=sub.add_parser("reply",parents=[common], help="reply in-thread with the context you would otherwise go hunting for"); r.add_argument("id"); r.add_argument("-m",default=None); r.add_argument("--dry-run",action="store_true",dest="dry_run",help="name the account, recipient and subject the reply would carry; create nothing, call nothing"); r.set_defaults(fn=cmd_reply)
     cp=sub.add_parser("compose",parents=[common], help="start a new message from the CLI"); cp.add_argument("--to",required=True); cp.add_argument("--subject",required=True); cp.add_argument("-m",required=True); cp.set_defaults(fn=cmd_compose)
     dr=sub.add_parser("draft",parents=[common], help="leave a real Gmail draft for yourself to review and send"); dr.add_argument("action",choices=["list","show","delete"]); dr.add_argument("target",nargs="?"); dr.set_defaults(fn=cmd_draft)
     rc=sub.add_parser("reconnect",parents=[common], help="a warm way back in with someone you have drifted from"); rc.add_argument("target"); rc.add_argument("-m",default=None); rc.add_argument("--subject",default=None); rc.set_defaults(fn=cmd_reconnect)
