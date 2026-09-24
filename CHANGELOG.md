@@ -4,6 +4,10 @@ Releases of exo-mesh. Each entry names the source commit it was exported from.
 
 ---
 
+## [2026-09-24] — v0.3.4 — the data-flow chart uses the OPAQUE node types: Sand external sources, a green security boundary, one focal pair
+- Source commit: 8fc8164
+
+
 ## [2026-09-24] — v0.3.3 — the data-flow chart uses the OPAQUE palette
 - Source commit: 60b25dd
 
