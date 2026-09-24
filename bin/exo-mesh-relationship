@@ -1,0 +1,218 @@
+#!/bin/sh
+''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
+"""exo-mesh-relationship — the dynamics of one relationship across mail and texts, computed locally.
+
+  exo-mesh relationship <person> [--since <dur|YYYY-MM-DD>] [--until YYYY-MM-DD]
+                        [--gap 8] [--follow-up 60] [--tz <zone>]
+
+The person is a phone number, an exact email address or a full name (see mesh_person for
+the three tiers). The window ends at --until (the end of that day in --tz), which defaults to
+the person's newest item or reaction on any channel, never to now; --since is a duration back
+from there or a calendar day in --tz, and without it the window holds all history. Every
+statistic is computed from the items inside the window:
+
+  channels      {mail, texts, all}.{sent, received, first_contact, last_contact}, epoch
+                seconds; all = the sums, the earliest first and the latest last. texts also
+                carries reactions {given, received} (the standing tapbacks per type: love,
+                like, dislike, laugh, emphasize, question, emoji; a removal cancels the add it
+                undoes), read_latency_median_s (how long the other person took to read the
+                owner's texts: the median over read sent texts) and edits. mail carries none of
+                those three. A channel whose store is absent is null, and sources names its path.
+  initiation    {owner, other}: who sent the first item after a silence longer than --gap
+                hours, on any channel. An item's predecessor is looked up in the whole
+                history, so the first item ever starts nothing.
+  streak        {longest_days, start, end}: the longest run of consecutive local days in --tz
+                with at least one item.
+  gaps          [{days, start, end}], the five longest silences between consecutive items in
+                the window, longest first.
+  double_texts  {owner, other}: an item at least --follow-up minutes after the same side's
+                previous item, with no item from the other side between.
+  heatmap       {Mon .. Sun: [24 counts]} by local weekday and hour in --tz.
+
+Reactions are never messages: they are counted in reactions and nowhere else. --tz defaults to
+the process's local timezone (TZ). The envelope's content_trust is "derived": the data holds
+counts and instants, and no message text.
+
+CONTRACT. Read-only (stores opened mode=ro; the only process launched is the local notmuch,
+read-only), offline, and deterministic: same stores and arguments in, same bytes out, whatever
+the clock reads. Exit codes: 0 answered · 1 USAGE · 2 NOTFOUND · 8 AMBIGUOUS.
+"""
+import os
+import statistics
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mesh_person as MP
+
+WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+TOP_GAPS = 5
+DERIVED = "derived"
+USAGE = ("exo-mesh relationship <person> [--since <dur|YYYY-MM-DD>] [--until YYYY-MM-DD]\n"
+         "                      [--gap 8] [--follow-up 60] [--tz <zone>]\n"
+         "\n"
+         "  <person>     a phone number, an exact email address, or a full name.\n"
+         "  --since      a duration back from --until (12h, 90d, 2w) or a date in --tz.\n"
+         "               Default: all history.\n"
+         "  --until      a date in --tz; the window ends at its last second. Default: the\n"
+         "               person's newest item or reaction on any channel.\n"
+         "  --gap        hours of silence after which an item starts a conversation. Default 8.\n"
+         "  --follow-up  minutes after a side's own unanswered item that make a double text.\n"
+         "               Default 60.\n"
+         "  --tz         the timezone for days, streaks and the heatmap (an IANA name).\n"
+         "               Default: the local timezone.\n"
+         "  --json       accepted for symmetry; the output is always the JSON envelope.")
+HINT = "exo-mesh relationship --help"
+
+
+def positive(opts, name):
+    try:
+        v = float(opts[name])
+    except (TypeError, ValueError):
+        v = 0.0
+    if not v > 0:
+        raise MP.MeshError("USAGE", "--%s must be a positive number; got %r" % (name, opts[name]), HINT)
+    return v
+
+
+def side(it):
+    return "owner" if it["direction"] == "sent" else "other"
+
+
+def channel_stats(items):
+    return {"sent": sum(1 for it in items if it["direction"] == "sent"),
+            "received": sum(1 for it in items if it["direction"] == "received"),
+            "first_contact": items[0]["t"] if items else None,
+            "last_contact": items[-1]["t"] if items else None}
+
+
+def standing_reactions(reactions):
+    """{given, received}: per tapback type, the reactions still standing after removals."""
+    net = {"owner": {}, "other": {}}
+    for r in reactions:
+        typ = r["type"]
+        if 2000 <= typ <= 2006:
+            k = (r["target"], typ - 2000)
+            net[r["side"]][k] = net[r["side"]].get(k, 0) + 1
+        elif 3000 <= typ <= 3006:
+            k = (r["target"], typ - 3000)
+            net[r["side"]][k] = max(0, net[r["side"]].get(k, 0) - 1)
+    out = {}
+    for s, key in (("owner", "given"), ("other", "received")):
+        counts = dict((name, 0) for name in MP.TAPBACKS)
+        for (_, i), n in sorted(net[s].items()):
+            counts[MP.TAPBACKS[i]] += n
+        out[key] = counts
+    return out
+
+
+def texts_stats(items, reactions):
+    st = channel_stats(items)
+    lat = [it["read_latency_s"] for it in items if it["read_latency_s"] is not None]
+    st["reactions"] = standing_reactions(reactions)
+    st["read_latency_median_s"] = round(statistics.median(lat), 3) if lat else None
+    st["edits"] = sum(1 for it in items if it["edited"])
+    return st
+
+
+def all_stats(chans):
+    live = [c for c in chans if c is not None]
+    firsts = [c["first_contact"] for c in live if c["first_contact"] is not None]
+    lasts = [c["last_contact"] for c in live if c["last_contact"] is not None]
+    return {"sent": sum(c["sent"] for c in live), "received": sum(c["received"] for c in live),
+            "first_contact": min(firsts) if firsts else None,
+            "last_contact": max(lasts) if lasts else None}
+
+
+def dynamics(history, lo, hi, gap_s, follow_s, zone):
+    """initiation, double texts, streak, gaps and heatmap over the items inside [lo, hi]; an
+    item's predecessor comes from the whole history."""
+    initiation = {"owner": 0, "other": 0}
+    doubles = {"owner": 0, "other": 0}
+    heat = dict((d, [0] * 24) for d in WEEKDAYS)
+    days = set()
+    inside = []
+    for i, it in enumerate(history):
+        if not MP.in_window(it["t"], lo, hi):
+            continue
+        inside.append(it)
+        day, wd, hour = zone.parts(it["t"])
+        heat[WEEKDAYS[wd]][hour] += 1
+        days.add(day)
+        if i == 0:
+            continue
+        prev = history[i - 1]
+        dt = it["t"] - prev["t"]
+        if dt > gap_s:
+            initiation[side(it)] += 1
+        if side(prev) == side(it) and dt >= follow_s:
+            doubles[side(it)] += 1
+    best = (0, None, None)
+    run_start = prev_day = None
+    for d in sorted(days):
+        run_start = d if prev_day is None or d != prev_day + 1 else run_start
+        prev_day = d
+        if d - run_start + 1 > best[0]:
+            best = (d - run_start + 1, run_start, d)
+    gaps = sorted(((b["t"] - a["t"], a["t"], b["t"]) for a, b in zip(inside, inside[1:])),
+                  key=lambda g: (-g[0], g[1]))[:TOP_GAPS]
+    return {"initiation": initiation,
+            "streak": {"longest_days": best[0], "start": MP.iso_day(best[1]), "end": MP.iso_day(best[2])},
+            "gaps": [{"days": round(g / 86400.0, 2), "start": a, "end": b} for g, a, b in gaps],
+            "double_texts": doubles,
+            "heatmap": heat}
+
+
+def main(argv):
+    query, opts, wants_help = MP.parse_args(
+        argv, {"since": None, "until": None, "gap": "8", "follow-up": "60", "tz": None}, HINT)
+    if wants_help:
+        print(USAGE)
+        return MP.EXIT["OK"]
+    gap_h, follow_m = positive(opts, "gap"), positive(opts, "follow-up")
+    zone = MP.Zone(opts["tz"])
+    MP.resolve_window(opts["since"], opts["until"], zone, 0)      # reject a malformed window up front
+    if not query:
+        raise MP.MeshError("USAGE", "no person given", HINT)
+
+    person = MP.resolve_person(query, MP.load_identities())
+    tl = MP.load_timeline(person, ("mail", "texts"))
+    src = tl["sources"]
+    if not (src["mail"]["available"] or src["texts"]["available"]):
+        raise MP.MeshError("NOTFOUND", "no channel is readable: mail at %s, texts at %s"
+                           % (src["mail"]["path"], src["texts"]["path"]),
+                           "run exo-imsg snapshot, and check notmuch", path=src["texts"]["path"])
+
+    history = tl["items"]
+    lo, hi = MP.resolve_window(opts["since"], opts["until"], zone, tl["newest"])
+    inside = [it for it in history if MP.in_window(it["t"], lo, hi)]
+    mail = [it for it in inside if it["channel"] == "mail"]
+    texts = [it for it in inside if it["channel"] == "texts"]
+    reactions = [r for r in tl["reactions"] if MP.in_window(r["t"], lo, hi)]
+    chans = {"mail": channel_stats(mail) if src["mail"]["available"] else None,
+             "texts": texts_stats(texts, reactions) if src["texts"]["available"] else None}
+    chans["all"] = all_stats([chans["mail"], chans["texts"]])
+    data = {"channels": chans}
+    data.update(dynamics(history, lo, hi, gap_h * 3600, follow_m * 60, zone))
+    data["window"] = {"since": lo, "until": hi}
+    # The effective zone, not the raw --tz option: with no --tz, opts["tz"] is None and the output
+    # still depends on the process's TZ (the heatmap, streak days, the --until day boundary), so the
+    # params must name what actually produced it, not leave the reader to guess.
+    data["params"] = {"gap_hours": gap_h, "follow_up_minutes": follow_m, "tz": zone.effective_name()}
+
+    a = chans["all"]
+    span = ("%s..%s UTC" % (MP.utc_day(a["first_contact"]), MP.utc_day(a["last_contact"]))
+            if a["first_contact"] is not None else "no items")
+    summary = "%s: %d sent, %d received (mail %s, texts %s), %s; started by owner %d, other %d" % (
+        person["name"] or person["identity_id"], a["sent"], a["received"],
+        len(mail) if chans["mail"] is not None else "unavailable",
+        len(texts) if chans["texts"] is not None else "unavailable",
+        span, data["initiation"]["owner"], data["initiation"]["other"])
+    return MP.emit(MP.ok_envelope(person, data, src, summary, DERIVED))
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except MP.MeshError as e:
+        sys.exit(MP.emit(e.envelope()))

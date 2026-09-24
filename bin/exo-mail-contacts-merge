@@ -22,6 +22,7 @@ import exomail_config as CFG
 
 PROJ = CFG.workdir()
 MASTER_DB = CFG.store_path("contacts-master.db")
+PHONES_FORMAT = 2            # master.phones one stored value per line; the mesh resolver reads it
 SOCIAL_ORGS = ("twitter", "linkedin", "facebook", "instagram", "x corp", "tiktok")
 NONPERSON = ("no-reply", "noreply", "donotreply", "do-not-reply", "remove@", "unsubscribe",
              "everyone@", "info@", "support@", "sales@", "admin@", "postmaster@", "mailer-daemon")
@@ -207,11 +208,23 @@ def main():
     con = sqlite3.connect(MASTER_DB)
     con.execute("DROP TABLE IF EXISTS master")
     con.execute("""CREATE TABLE master(id INTEGER PRIMARY KEY, name TEXT, org TEXT, title TEXT,
-                   emails TEXT, phones TEXT, sources TEXT, n_sources INT, quality TEXT)""")
+                   emails TEXT, phones TEXT, sources TEXT, n_sources INT, quality TEXT,
+                   phones_format INTEGER)""")
+    # Phones are stored one value per line, each exactly as its address-book field held it. A
+    # formatted number has spaces of its own, so joining several with spaces would erase where one
+    # ends and the next begins; the mesh resolver keys a card's numbers one stored value at a time.
+    # A reader that lists the values themselves splits lines, never whitespace (exo-mail contact).
+    # Emails stay space-joined: an address holds no space.
     for i, p in enumerate(persons):
-        con.execute("INSERT INTO master VALUES(?,?,?,?,?,?,?,?,?)",
-                    (i, p["name"], p["org"], p["title"], " ".join(p["emails"]), " ".join(p["phones"]),
-                     ",".join(p["sources"]), p["n_sources"], p["quality"]))
+        con.execute("INSERT INTO master VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (i, p["name"], p["org"], p["title"], " ".join(p["emails"]), "\n".join(p["phones"]),
+                     ",".join(p["sources"]), p["n_sources"], p["quality"], PHONES_FORMAT))
+    # The format mark, in two halves: 2 is one phone value per line, on every row (the column above)
+    # and on the store (user_version). The mesh resolver reads both, and names a master missing
+    # either (one an old merge wrote, a card's values joined by spaces) until this runs again. The
+    # halves are two because an old merge rewrites the table and never touches user_version, which
+    # lives in the file's header; the column goes with the table it drops.
+    con.execute("PRAGMA user_version = %d" % PHONES_FORMAT)
     con.commit(); con.close()
 
     # human summary

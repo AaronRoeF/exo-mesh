@@ -1,6 +1,6 @@
 #!/bin/sh
 ''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
-DOC = """exo-cal — local-first calendar replica (P7). Mirrors the mail stack.
+DOC = """exo-cal — local-first calendar replica. Mirrors the mail stack.
 
   exo-cal auth <work|personal>     one-time Google consent (calendar.readonly)
   exo-cal pull-google <work|personal>   events.list → calendar.db (windowed)

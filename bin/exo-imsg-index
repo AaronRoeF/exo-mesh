@@ -15,6 +15,7 @@ import json, os, re, sqlite3, sys, time, urllib.request, datetime
 import sqlite_vec
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import exomail_config as CFG
+from mesh_person import phones_of
 
 SNAP=CFG.store_path("imessage", "snapshot.db")
 VEC =CFG.store_path("vectors.db")
@@ -42,12 +43,12 @@ def name_map():
     if not os.path.exists(MASTER): return m
     c=sqlite3.connect(f"file:{MASTER}?mode=ro",uri=True)
     for name,emails,phones in c.execute("select name,emails,phones from master where name is not null"):
-        for e in (emails or "").replace(";",",").split(","):
+        # Every value on the card names it: emails are space-joined, phones one value per line,
+        # keyed by the resolver's own rule so a text is named by the card its identity is.
+        for e in re.split(r"[\s,;]+",emails or ""):
             e=e.strip().lower()
             if "@" in e: m.setdefault(e,name)
-        for p in (phones or "").replace(";",",").split(","):
-            d=digits(p)
-            if len(d)>=10: m.setdefault(d[-10:],name)
+        for k in phones_of(phones): m.setdefault(k,name)
     c.close(); return m
 
 def resolve(handle,nm):

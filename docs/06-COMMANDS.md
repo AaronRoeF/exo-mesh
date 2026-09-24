@@ -14,11 +14,22 @@ pipe. `exo-mail <command> --help` has the flags.
 
 ### You know you got that email — `exo-mail search`
 You remember the sender, or a phrase, or roughly when. Search your entire archive with
-full boolean syntax, offline, faster than a web page loads.
+full boolean syntax, offline, faster than a web page loads. By default it searches mail
+**and** texts together, merged by time and listed newest first, keeping the newest
+`--limit` matches across both; a notmuch field query (`from:`, `tag:`, …) answers from
+mail alone, since that syntax means nothing to the text index. `--channel mail` stays the
+original mail-only shape, newest first as it always was; `--channel texts` searches only
+the recovered iMessage text, also newest first, including text that lives only in the
+packed body. Text results carry `content_trust: "untrusted"`. `--account` narrows mail
+only: texts belong to no account, so an account-narrowed search answers from that
+account's mail and names texts as skipped. A text index that cannot be read never stops
+the mail side either: texts are named as skipped, with `exo-imsg-search --build` as the
+repair (under `--channel texts` it is a not-found error with the same hint).
 
 ```bash
 exo-mail search 'from:jordan@example.com and date:2026..'
 exo-mail search 'subject:"renewal" and not tag:exo/feed' --limit 10
+exo-mail search "let's do lunch" --channel texts
 ```
 
 ### You remember the argument, not the words — `exo-mail semantic`
@@ -74,6 +85,30 @@ Walk in knowing where you actually stand.
 exo-mail contact show "Jordan Rivera"
 exo-mail contact list --limit 40
 exo-mail contact search rivera
+```
+
+### You want the messages themselves, not just the summary — `exo-mesh conversation`
+One person's mail and texts merged into a single timeline, oldest to newest, each item
+carrying its channel and direction. Windowed by `--since`/`--until` (default: the 90 days
+up to their newest item), capped by `--limit`. Message text is real content pulled off
+your disk — the envelope marks it `content_trust: "untrusted"` so a caller knows to treat
+it as the other person's words, not a verified fact.
+
+```bash
+exo-mesh conversation "Jordan Rivera"
+exo-mesh conversation "+15551234567" --since 30d --channels texts
+```
+
+### You want the pattern, not the messages — `exo-mesh relationship`
+The same cross-channel history as `conversation`, reduced to numbers: sent and received
+per channel, who usually breaks a silence, the longest run of consecutive days in touch,
+the longest gaps, unanswered follow-ups, a heatmap of when you talk, and — for texts —
+standing tapback reactions and how long they take to read you. No message text leaves the
+machine; the envelope is `content_trust: "derived"`.
+
+```bash
+exo-mesh relationship "Jordan Rivera"
+exo-mesh relationship "Jordan Rivera" --since 52w --gap 12 --tz America/New_York
 ```
 
 ### You want to find out you are losing someone while you can still do something — `exo-mail contact drift`
@@ -182,8 +217,12 @@ Refreshes the local calendar replica from Apple and both Google accounts, skippi
 that are not authorised.
 
 ### You want a text you half-remember from three years ago — `exo-imsg-search`
-Exact-phrase search over the local iMessage snapshot. `exo-imsg snapshot` takes the
-read-only copy it searches.
+Builds and refreshes the text index `exo-mail search`'s texts side reads. `exo-imsg
+snapshot` takes the read-only copy it indexes; `--refresh` then indexes only messages
+newer than the last run's cursor (by row id) -- a message edited in place keeps its old
+indexed words until the next `--build`, and the very first run is always a full build.
+`--build` rebuilds the index from scratch. Reactions (tapbacks) are never indexed as
+searchable text.
 
 ---
 

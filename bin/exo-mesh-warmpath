@@ -117,7 +117,7 @@ def meeting_edges(target_addrs):
             if not start:
                 continue
             # A recurring series' NEXT instance is in the future. Reporting it as "most
-            # recent together" is the P9 defect class (future cal_last inflating
+            # recent together" is a known defect class (future cal_last inflating
             # recency) -- so past and future are tracked separately. A shared meeting
             # already on the calendar is its own useful signal, not a stale one.
             if start <= NOW:

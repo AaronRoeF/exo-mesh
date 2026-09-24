@@ -12,11 +12,24 @@ GOTCHA-CORRECT: iMessage counterparty is resolved via chat_handle_join (1:1 chat
 exactly 1 participant) + chat_message_join, NEVER `join handle` (sent msgs have
 handle_id=0 -> that join drops ~45%). Per-person, from message/handle directly,
 not from windows. Apple ns date -> unix via /1e9 + 978307200.
+
+REACTIONS ARE NOT MESSAGES. A row whose associated_message_type is in 2000-3999 is a
+tapback (2000-2006 add one, 3000-3006 remove one). None of them enters imsg_count,
+imsg_sent, imsg_recv, imsg_first or imsg_last: a like is not a conversation. A snapshot
+without that column (an older or fixture store) has no reactions to exclude.
+
+PEOPLE WHO ONLY TEXT. After the address book and the mail corpus, a handle with two-way
+1:1 traffic (reactions excluded) that no identity owns becomes one identity of its own,
+named with the handle. "Owns" compares phones by their last ten digits whatever their
+formatting, and emails case-insensitively, so a handle already on a card or a corpus
+address is never seeded twice. One-way handles (short codes, delivery notices, codes)
+never are, and neither is anything on the owner's own card.
 Writes: mesh.db table identity (one canonical person per row).
 """
 import os, sqlite3, re, json, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import exomail_config as CFG
+from mesh_person import phones_of   # the card phone rule every surface shares
 
 MASTER = CFG.store_path("contacts-master.db")
 CONTACTS = CFG.store_path("contacts.db")
@@ -24,41 +37,54 @@ SNAP = CFG.store_path("imessage", "snapshot.db")
 CAL = CFG.store_path("calendar.db")
 MESH = CFG.store_path("mesh.db")
 APPLE_EPOCH = 978307200
+MASTER_FORMAT = 2   # exo-mail-contacts-merge's mark: phones one value per line (user_version, and
+                    # the master table's phones_format column)
 SELF_EMAILS = CFG.self_emails()
 
 def n10(s):
     d = re.sub(r"\D", "", s or "")
     return d[-10:] if len(d) >= 10 else ""
 
-# master stores phones space-joined, but a single formatted phone contains
-# spaces (e.g. +1 (555) 0100 style), so a whitespace split shatters it. Extract
-# phone-shaped (3-3-4) runs instead — works for one phone or several.
-PHONE = re.compile(r"\+?1?\s*\(?\d{3}\)?[\s.\-]*\d{3}[\s.\-]*\d{4}")
-def phones_of(s):
-    return [p for p in (n10(m) for m in PHONE.findall(s or "")) if p]
+# A card's numbers are keyed by the shared rule in mesh_person (key_of, phones_of): one stored value
+# of master.phones at a time, never across two, and nothing when a value cannot be read without a
+# guess. The text surfaces name texts by the same rule, so they and the identity table agree.
 
 def nem(s):
     s = (s or "").strip().lower()
     return s if "@" in s else ""
 
+REACTION_LO, REACTION_HI = 2000, 3999   # tapback adds (2000-2006) and removals (3000-3006)
+
 def imsg_by_counterparty():
+    """({norm_key: {last,first,count,sent,recv,handle}}, reactions_excluded) over 1:1 chats,
+    sent-inclusive, reactions excluded. `handle` is the key's raw handle as Messages stores it
+    (the smallest string when several map to one key), so a text-only identity is named with it."""
     if not os.path.exists(SNAP):   # tolerated like calendar.db: an absent optional store is an empty channel
-        return {}
-    """{norm_key: {last_unix,count,sent,recv}} over 1:1 chats, sent-inclusive."""
+        return {}, 0
     c = sqlite3.connect("file:%s?mode=ro" % SNAP, uri=True)
     part = {}
     for cid, hid in c.execute("SELECT chj.chat_id, h.id FROM chat_handle_join chj JOIN handle h ON h.ROWID=chj.handle_id"):
         part.setdefault(cid, set()).add(hid)
     one = {cid: next(iter(hs)) for cid, hs in part.items() if len(hs) == 1}
+    amt = CFG.col_of(c, "message", "associated_message_type")
+    kind = "coalesce(m.%s,0)" % amt if amt else "0"
     agg = {}
-    for cid, date, fromme in c.execute("SELECT cmj.chat_id, m.date, m.is_from_me FROM message m JOIN chat_message_join cmj ON cmj.message_id=m.ROWID"):
+    reactions = 0
+    for cid, date, fromme, typ in c.execute(
+            "SELECT cmj.chat_id, m.date, m.is_from_me, %s FROM message m "
+            "JOIN chat_message_join cmj ON cmj.message_id=m.ROWID" % kind):
         h = one.get(cid)
         if not h:
             continue
         k = n10(h) or nem(h)
         if not k:
             continue
-        a = agg.setdefault(k, {"last": 0.0, "first": 0.0, "count": 0, "sent": 0, "recv": 0})
+        if isinstance(typ, int) and REACTION_LO <= typ <= REACTION_HI:
+            reactions += 1
+            continue
+        a = agg.setdefault(k, {"last": 0.0, "first": 0.0, "count": 0, "sent": 0, "recv": 0, "handle": h})
+        if h < a["handle"]:
+            a["handle"] = h
         u = (date / 1e9 + APPLE_EPOCH) if date else 0
         if u > a["last"]:
             a["last"] = u
@@ -67,7 +93,7 @@ def imsg_by_counterparty():
         a["count"] += 1
         a["sent" if fromme else "recv"] += 1
     c.close()
-    return agg
+    return agg, reactions
 
 def email_stats():
     c = sqlite3.connect("file:%s?mode=ro" % CONTACTS, uri=True)
@@ -112,17 +138,32 @@ def cal_by_counterparty():
 
 def main():
     testmode = "--test" in sys.argv
-    im = imsg_by_counterparty()
+    im, reactions_excluded = imsg_by_counterparty()
     es = email_stats()
     cal = cal_by_counterparty()
     m = sqlite3.connect("file:%s?mode=ro" % MASTER, uri=True)
+    # The merge marks the master it writes, in two halves: user_version 2 on the store, and a
+    # phones_format column on the master table. Both must be there. The old merge rewrites the table
+    # in place and never touches user_version, which lives in the file's header, so run after the new
+    # merge it leaves space-joined numbers under a store still marked 2; the column goes with the
+    # table it drops. A master in the old format joins a card's numbers with spaces, which no rule can
+    # split (a formatted number has spaces of its own), so a card with two or more numbers keys none
+    # of them. It is still resolved, since the sync runs this every few minutes, and it is named: in
+    # the summary, and in one stderr line (the sync's log) naming the command that rewrites it.
+    marked = m.execute("PRAGMA user_version").fetchone()[0] >= MASTER_FORMAT
+    master_format = "current" if marked and CFG.col_of(m, "master", "phones_format") else "legacy"
+    if master_format == "legacy":
+        print("exo-mesh-resolve: %s is in the old phone format (a card's numbers joined by spaces, so a card "
+              "with two or more numbers keys none of them); run exo-mail-contacts-merge once to rewrite it"
+              % MASTER, file=sys.stderr)
     persons = []
     self_set_master = {e.lower() for e in SELF_EMAILS}
     self_skipped = 0
     skipped_card_addrs = set()
+    skipped_card_phones = set()
     for pid, name, emails, phones in m.execute("SELECT id,name,emails,phones FROM master"):
         em = [x for x in (emails or "").split() if "@" in x]
-        # The owner's own address-book card (R7): a master person carrying ANY of the owner's
+        # The owner's own address-book card: a master person carrying ANY of the owner's
         # addresses IS the owner, even when the card also carries other, non-self addresses from a
         # different employer -- one master row is one person, so the whole card is excluded, not
         # just the matching address. Mirrors the corpus pass's self_set exclusion below, at person
@@ -132,13 +173,16 @@ def main():
             self_skipped += 1
             # WIDEN (2026-09-20): every address on an identified self-card is the owner's, not just
             # the one(s) literally listed in EXO_MAIL_SELF_EMAILS -- a second employer address on the
-            # SAME card is still the owner. Without this, skipping the card only relocates the R7 bug:
+            # SAME card is still the owner. Without this, skipping the card only relocates the bug:
             # its unlisted addresses are no longer "claimed" by a master row, so the corpus pass (which
             # only excludes the literal self_set) mints them as new singleton identities -- the owner
             # becomes an identity through the corpus door instead of the address-book door. Collected
-            # here and unioned into the corpus pass's self_set below, so R7's SHALL holds through BOTH
+            # here and unioned into the corpus pass's self_set below, so the owner rule holds through BOTH
             # seeding paths, not just the one that happened to be checked first.
             skipped_card_addrs.update(e.lower() for e in em)
+            # The same holds for the card's phones: the owner texting their own number is two-way
+            # 1:1 traffic, and the text-only pass below must not mint the owner from it.
+            skipped_card_phones.update(phones_of(phones))
             continue
         ph = phones_of(phones)
         persons.append((pid, name, em, ph))
@@ -180,9 +224,9 @@ def main():
 
     rows = [build_row(pid, name, em, ph) for pid, name, em, ph in persons]
 
-    # ── corpus seeding (spec exo-mesh R4–R8, R11): every two-way correspondent gets a row ────────
-    # Until this landed, identity was seeded from the address book ALONE — 16,318 persons, 16,318 rows —
-    # and two thirds of the people the owner actually corresponds with had no row (2026-09-13). A two-way
+    # ── corpus seeding: every two-way correspondent gets a row ─────────────────────────────────
+    # Until this landed, identity was seeded from the address book ALONE, one row per book entry,
+    # and most of the people the owner actually corresponds with had no row (2026-09-13). A two-way
     # address (sent AND received) that belongs to no address-book person becomes a singleton identity
     # carrying name, stats and people-file from contacts.db. The owner's own addresses never do.
     # Unconditional: the spec says one row per person, not one row per person if enabled. A rollout
@@ -195,6 +239,24 @@ def main():
     next_id = max([p[0] for p in persons], default=0) + 1
     for i, e in enumerate(singles):
         rows.append(build_row(next_id + i, (es[e][5] if len(es[e]) > 5 else "") or e, [e], []))
+
+    # ── text-only seeding: everyone the owner texts both ways is a person ──────────────────────
+    # A handle with at least one sent and one received message in its 1:1 chats (reactions were
+    # already excluded) becomes one identity when no identity from the address book or the corpus
+    # owns it. Ownership is read from the rows just built, so it is exactly what the identity table
+    # will say: phones as last-ten-digit keys (phones_of normalizes any formatting on the card),
+    # emails case-insensitively. No twin: a handle an identity owns is never seeded again. The
+    # owner's addresses and the owner card's phones are never seeded. Ids continue after the corpus
+    # singletons, in key order, so they are deterministic over unchanged stores.
+    owned = set(self_set) | skipped_card_phones
+    for r in rows:
+        owned.update(r["phones"].split())
+        owned.update(e.lower() for e in r["emails"].split())
+    texts = sorted(k for k, a in im.items() if a["sent"] > 0 and a["recv"] > 0 and k not in owned)
+    next_text = next_id + len(singles)
+    for i, k in enumerate(texts):
+        em, ph = ([k], []) if "@" in k else ([], [k])
+        rows.append(build_row(next_text + i, im[k]["handle"], em, ph))
 
     unified = [r for r in rows if r["email_count"] > 0 and r["imsg_count"] > 0]
     imsg_any = [r for r in rows if r["imsg_count"] > 0]
@@ -219,7 +281,9 @@ def main():
     print(json.dumps({
         "identities": len(rows),
         "seed_master": len(persons),
+        "master_format": master_format,
         "seed_corpus": len(singles),
+        "seed_texts": len(texts),
         "self_skipped": self_skipped,
         "unified_email+imsg": len(unified),
         "prev_bridge": 79,
@@ -228,6 +292,7 @@ def main():
         "tri_channel_email+imsg+cal": len(tri),
         "multi_channel(2+)": len(multi),
         "imsg_counterparties_indexed": len(im),
+        "imsg_reactions_excluded": reactions_excluded,
         "cal_counterparties_indexed": len(cal),
         "mesh_db": MESH if not testmode else "(test — not written)"}, indent=2))
 

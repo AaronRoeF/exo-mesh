@@ -1,6 +1,6 @@
 #!/bin/sh
 ''''exec "${0%/*}/exo-mail-python" "$0" "$@" # '''
-"""exo-day — the unified day surface (P7). One read across the local stores:
+"""exo-day — the unified day surface. One read across the local stores:
 calendar (calendar.db) + todos (Things SQLite) + mail (exo-mail brief) + journal
 (a dated markdown note), plus who each of today's attendees is to you, resolved
 through the relationship mesh (mesh.db). Read-only; composes, never writes.
@@ -104,14 +104,29 @@ def _relationship(addr, idx, bed, now):
             "person_file": pf or None}
 
 def things_counts():
-    g = glob.glob(os.path.expanduser("~/Library/Group Containers/*/ThingsData-*/Things Database.thingsdatabase/main.sqlite"))
-    if not g: return None
-    c = sqlite3.connect("file:%s?mode=ro" % g[0], uri=True)
-    def n(where):
-        try: return c.execute("SELECT COUNT(*) FROM TMTask WHERE type=0 AND status=0 AND trashed=0 AND " + where).fetchone()[0]
-        except Exception: return None
-    out = {"today": n("start=1"), "inbox": n("start=0 AND project IS NULL AND area IS NULL")}
-    c.close(); return out
+    """(counts, None) once the Things database was opened and BOTH counts were read, else
+    (None, reason): unknown, never zero. The database sits in another app's group container, and
+    macOS's "access data from other apps" consent guards it; until that is given, a read fails,
+    and a failed read must never look like an empty to-do list (or take the day surface down)."""
+    try:
+        g = glob.glob(os.path.expanduser("~/Library/Group Containers/*/ThingsData-*/Things Database.thingsdatabase/main.sqlite"))
+    except OSError as exc:
+        return None, "the Things database could not be looked for (%s)" % exc
+    if not g:
+        return None, "no Things database found (Things not installed, or its container cannot be read)"
+    q = "SELECT COUNT(*) FROM TMTask WHERE type=0 AND status=0 AND trashed=0 AND "
+    try:
+        c = sqlite3.connect("file:%s?mode=ro" % g[0], uri=True)
+        try:
+            today = c.execute(q + "start=1").fetchone()[0]
+            inbox = c.execute(q + "start=0 AND project IS NULL AND area IS NULL").fetchone()[0]
+        finally:
+            c.close()
+    except sqlite3.Error as exc:
+        return None, "the Things database could not be read: %s (%s)" % (g[0], exc)
+    if not isinstance(today, int) or not isinstance(inbox, int):
+        return None, "the Things database answered without counts: %s" % g[0]
+    return {"today": today, "inbox": inbox}, None
 
 def mail_brief():
     try:
@@ -123,20 +138,27 @@ def mail_brief():
         return None
 
 def journal_today():
+    """(True|False|None, reason). EXO_MAIL_NOTES = a markdown notes dir; a file named
+    YYYY-MM-DD.md anywhere under it counts as today's journal entry. Unset = the line reports
+    "no note" (False). A dir that is set but cannot be read (missing, or refused — a vault in
+    iCloud Drive is consent-guarded) is unknown (None), never "no note": a refused listing
+    returns nothing, exactly like a dir with no note in it."""
     today = datetime.date.today().isoformat()
-    # EXO_MAIL_NOTES = a markdown notes dir; a file named YYYY-MM-DD.md anywhere
-    # under it counts as today's journal entry. Unset = the line reports "no note".
-    vaults = [v for v in (CFG.notes_dir(),) if v]
-    for v in vaults:
-        hits = glob.glob(os.path.join(v, "**", today + ".md"), recursive=True)
-        if hits: return True
-    return False
+    v = CFG.notes_dir()
+    if not v:
+        return False, None
+    try:
+        os.listdir(v)
+    except OSError as exc:
+        return None, "the notes directory cannot be read: %s (%s)" % (v, exc.strerror or exc)
+    hits = glob.glob(os.path.join(v, "**", today + ".md"), recursive=True)
+    return bool(hits), None
 
 def main():
     today, week = cal_events()
-    things = things_counts()
+    things, things_why = things_counts()
     mail = mail_brief()
-    journ = journal_today()
+    journ, journ_why = journal_today()
     now = time.time()
     idx = bed = mine = None          # built lazily: an empty calendar pays nothing
     meetings = []
@@ -159,6 +181,10 @@ def main():
     data = {"date": datetime.date.today().isoformat(),
             "meetings_today": meetings,
             "meetings_next_7d": week, "todos": things, "mail": mail, "journal_note_exists": journ}
+    # What could not be read is said, with why: null is unknown, never zero or "no note".
+    unknown = {k: why for k, why in (("todos", things_why), ("journal", journ_why)) if why}
+    if unknown:
+        data["unknown"] = unknown
     if JSON:
         print(json.dumps(data, indent=2)); return 0
     d = datetime.date.today().strftime("%A %B %-d")
@@ -179,10 +205,15 @@ def main():
     if not today: print("  (nothing on the calendar today)")
     if things:
         print("\nTODOS   today %s · inbox %s" % (things["today"], things["inbox"]))
+    else:
+        print("\nTODOS   unknown — %s" % things_why)
     if mail:
         print("MAIL    %s need reply · %s vip unread · %s drifting · inbox %s"
               % (mail["needs_reply"], mail["vip_unread"], mail["drifting"], mail["inbox"]))
-    print("JOURNAL %s" % ("today's note exists" if journ else "no note yet — start one"))
+    if journ is None:
+        print("JOURNAL unknown — %s" % journ_why)
+    else:
+        print("JOURNAL %s" % ("today's note exists" if journ else "no note yet — start one"))
     _tok = any(os.path.exists(os.path.join(CFG.config_dir(), "gcal-%s.token.json" % a))
                for a in CFG.accounts())
     src = "apple" + (" + google" if _tok else " (google pending auth)")

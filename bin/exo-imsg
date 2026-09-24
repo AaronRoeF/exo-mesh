@@ -7,7 +7,7 @@ Mirrors exo-mail-sync: atomic lock, incremental cursor, JSONL audit, fails loud.
 
   exo-imsg snapshot   WAL-consistent copy + advance cursor + audit
   exo-imsg status     cursor, counts, freshness
-  exo-imsg test       built-in self-checks (T1-T4, T10)
+  exo-imsg test       built-in self-checks T1-T4 and T10
 
 TCC: chat.db is protected by Full Disk Access. Without it this reads ZERO ROWS
 WITH NO ERROR -- indistinguishable from an empty database. Every path below
@@ -81,10 +81,13 @@ def cmd_snapshot(argv):
                 "not an empty database. Refusing to advance the cursor.")
 
         st = load_state()
-        if live_max < st["last_rowid"]:
-            die(f"cursor regression: live max ROWID {live_max} < last_rowid {st['last_rowid']} "
+        # .get(...,0), not st["last_rowid"]: a state file another tool (exo-imsg-search) wrote or
+        # touched can be readable JSON that simply lacks this key -- defend the cursor check itself
+        # rather than trust every writer of this shared file to have populated it.
+        if live_max < st.get("last_rowid", 0):
+            die(f"cursor regression: live max ROWID {live_max} < last_rowid {st.get('last_rowid', 0)} "
                 "- database may have been replaced. Refusing to proceed.",
-                live_max=live_max, last_rowid=st["last_rowid"])
+                live_max=live_max, last_rowid=st.get("last_rowid", 0))
 
         # --- WAL-consistent copy. sqlite3 .backup, NOT cp (cp loses the WAL).
         tmp = SNAP + ".tmp"
@@ -103,13 +106,13 @@ def cmd_snapshot(argv):
                 live=live_n, snap=snap_n)
 
         new_rows = 0
-        if snap_max > st["last_rowid"]:
+        if snap_max > st.get("last_rowid", 0):
             c = ro(SNAP)
             new_rows = c.execute("select count(*) from message where ROWID > ?",
-                                 (st["last_rowid"],)).fetchone()[0]
+                                 (st.get("last_rowid", 0),)).fetchone()[0]
             c.close()
 
-        prev = st["last_rowid"]
+        prev = st.get("last_rowid", 0)
         st.update(last_rowid=snap_max, runs=st.get("runs", 0) + 1,
                   last_run=ts(), rows=snap_n, services=snap_svc)
         save_state(st)

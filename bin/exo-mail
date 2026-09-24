@@ -21,7 +21,7 @@ success, `{ok:false, error, code, hint, retryable}` on failure. Typed exit codes
 1 Usage, 2 NotFound, 3 Auth, 6 Network, 7 API. Global flags: `--json --account <name>|all --limit N`.
 
 ## Reading
-- `exo-mail search "<notmuch query>" [--account] [--limit]` — keyword/structured search.
+- `exo-mail search "<notmuch query>" [--account] [--limit] [--channel mail|texts|all]` — keyword/structured search; default `all` merges mail and recovered iMessage text, newest first, and its rows carry `content_trust: "untrusted"` (a mail row still has `thread`; a text row does not). `--channel mail` keeps the original mail-only shape, unaffected. `--account` narrows mail only; texts belong to no account and are skipped.
 - `exo-mail semantic "<natural language>" [--account] [--since 90d]` — meaning-based search across both accounts; use for "find mail about X" when keywords are unknown.
 - `exo-mail box <imbox|feed|fins|paper-trail|reply-later>` — imbox=real correspondence, feed=newsletters, fins=financial/investments/tax.
 - `exo-mail thread <thread-id> --markdown` — read a thread, quote-stripped.
@@ -76,11 +76,142 @@ BOXES={"imbox":"tag:inbox and not tag:exo/feed and not tag:exo/fins and not tag:
 def _rows(so):
     return [{"thread":r.get("thread"),"date":r.get("date_relative"),"from":r.get("authors"),
              "subject":r.get("subject"),"tags":r.get("tags")} for r in json.loads(so or "[]")]
+
+# ── search --channel ─────────────────────────────────────────────────────────────────────────────
+# Mail query syntax notmuch understands and FTS5 does not: a bare `from:x` reads to FTS5 as a
+# column filter on a column that does not exist, so under the default (merged) channel such a
+# query answers from mail alone and never opens the text index.
+_MAIL_FIELD_PREFIXES = ("from","to","subject","tag","id","thread","folder","path","date",
+                        "lastmod","attachment","mimetype","property","query")
+_MAIL_SYNTAX_RE = re.compile(r'(?:^|[\s(])(?:%s):' % "|".join(_MAIL_FIELD_PREFIXES))
+def _is_mail_syntax(q): return bool(_MAIL_SYNTAX_RE.search(q or ""))
+
+def _imsg_digits(s): return re.sub(r"\D","",s or "")
+def _imsg_name_map():
+    """Same address-book lookup exo-imsg-search uses, kept local here so exo-mail's search path
+    never imports that CLI as a module. Phones are keyed by the resolver's own rule (mesh_person's
+    phones_of), so a text is named by the card the identity table gives its number."""
+    import sqlite3
+    from mesh_person import phones_of
+    m={}
+    master=CFG.store_path("contacts-master.db")
+    if not os.path.exists(master): return m
+    c=sqlite3.connect(f"file:{master}?mode=ro",uri=True)
+    for name,emails,phones in c.execute("select name,emails,phones from master where name is not null"):
+        # Every value on the card names it: emails are space-joined, phones one value per line.
+        for e in re.split(r"[\s,;]+",emails or ""):
+            e=e.strip().lower()
+            if "@" in e: m.setdefault(e,name)
+        for k in phones_of(phones): m.setdefault(k,name)
+    c.close(); return m
+def _imsg_resolve(h,nm):
+    if not h: return "?"
+    if "@" in h: return nm.get(h.lower(),h)
+    d=_imsg_digits(h)
+    return nm.get(d[-10:],h) if len(d)>=10 else h
+
+REBUILD_HINT="rebuild it: `exo-imsg-search --build`"
+def _search_texts(query,limit):
+    """→ (rows, error). error is None on success, "FTS5-ERROR:<msg>" when FTS5 rejected the query
+    (the same fallback covers any query FTS5 rejects, not only a recognised field prefix),
+    "UNREADABLE:<msg>" when the index cannot be read as a database (a file that is not one, a
+    malformed image), or a plain message when there is no index yet. A broken index is the same
+    as no index: it never raises, so it can never stop the mail side of a search."""
+    import sqlite3
+    fts=CFG.store_path("imessage","fts.db")
+    if not os.path.exists(fts):
+        return None,"no text index -- run `exo-imsg-search --refresh`"
+    q=query
+    if " " in q and not any(c in q for c in '"*:()'): q=f'"{q}"'   # bare phrase -> quoted, as exo-imsg-search does
+    try:
+        con=sqlite3.connect(f"file:{fts}?mode=ro",uri=True)
+    except sqlite3.DatabaseError as e:
+        return None,"UNREADABLE:%s"%e
+    try:
+        # Newest first, never FTS5's `rank`: rank favours short texts that repeat the query words,
+        # so cutting to --limit by rank before the merge keeps old texts and silently drops the
+        # newest ones whenever a side has more matches than the limit -- the exact case the limit
+        # exists for. `rowid` (the message's own snapshot ROWID) breaks ties on an identical `ts`.
+        rows=con.execute("select day,ts,handle,me,text from msg where msg match ? order by ts desc, rowid desc limit ?",(q,limit)).fetchall()
+    except sqlite3.OperationalError as e:      # FTS5 rejected the query: the query's problem
+        return None,"FTS5-ERROR:%s"%e
+    except sqlite3.DatabaseError as e:         # any other database error: the index is unreadable
+        return None,"UNREADABLE:%s"%e
+    finally:
+        con.close()
+    nm=_imsg_name_map()
+    return [{"channel":"texts","date":day,"timestamp":ts,"person":_imsg_resolve(handle,nm),
+              "handle":handle,"direction":"sent" if me else "received","text":text or ""}
+            for day,ts,handle,me,text in rows], None
+
+def _search_emit(data,summary,force_json,**extra):
+    """out_ok's envelope plus the untrusted-content/skipped-channel keys search alone needs;
+    --channel mail never calls this, so its byte-compatible envelope is untouched."""
+    if force_json or not is_tty():
+        env={"ok":True,"data":data,"summary":summary}; env.update(extra)
+        print(json.dumps(env))
+    else:
+        _styled(data,summary)
+    return EXIT["OK"]
+
 def cmd_search(a):
+    channel=getattr(a,"channel","all") or "all"
+    if channel=="mail":
+        # Byte-compatible with the pre-channel envelope: unchanged code path, unchanged shape.
+        q=a.query if a.account=="all" else "(%s) and %s"%(a.query,acct_q(a.account))
+        rc,so,se=nm("search","--format=json","--limit=%d"%a.limit,q)
+        if rc: return out_err("API","notmuch search failed",se.strip()[:120])
+        d=_rows(so); return out_ok(d,"%d threads"%len(d),a.json)
+
+    mail_syntax=_is_mail_syntax(a.query)
+
+    if channel=="texts":
+        if mail_syntax:
+            return out_err("USAGE","mail query syntax under --channel texts: %r"%a.query,
+                           "drop the field prefix, or use --channel mail")
+        rows,err=_search_texts(a.query,a.limit)
+        if err is None:
+            return _search_emit(rows,"%d texts"%len(rows),a.json,content_trust="untrusted")
+        if err.startswith("FTS5-ERROR:"):
+            return out_err("USAGE","bad query %r: %s"%(a.query,err.split(":",1)[1]),"")
+        if err.startswith("UNREADABLE:"):
+            return out_err("NOTFOUND","text index unreadable: %s"%err.split(":",1)[1],REBUILD_HINT)
+        return out_err("NOTFOUND",err,"run `exo-imsg-search --refresh`")
+
+    # channel == "all" (the default): merge mail and texts by time, mail-syntax skips texts
     q=a.query if a.account=="all" else "(%s) and %s"%(a.query,acct_q(a.account))
     rc,so,se=nm("search","--format=json","--limit=%d"%a.limit,q)
     if rc: return out_err("API","notmuch search failed",se.strip()[:120])
-    d=_rows(so); return out_ok(d,"%d threads"%len(d),a.json)
+    mail_rows=[{"thread":r.get("thread"),"date":r.get("date_relative"),"from":r.get("authors"),
+                "subject":r.get("subject"),"tags":r.get("tags"),
+                "channel":"mail","timestamp":r.get("timestamp")} for r in json.loads(so or "[]")]
+    skipped={}; text_rows=[]
+    if a.account!="all":
+        # An account is a mail account and texts belong to none, so an account-narrowed query never
+        # reads the text index: merging every text into a work-only query would put personal
+        # messages into it. The account is the reason named even when the query is mail syntax too.
+        skipped["texts"]="texts belong to no account; --account %s answers from mail alone"%a.account
+    elif mail_syntax:
+        skipped["texts"]="mail query syntax (%r) is answered from mail alone"%a.query
+    else:
+        rows,err=_search_texts(a.query,a.limit)
+        if err is None: text_rows=rows
+        elif err.startswith("FTS5-ERROR:"): skipped["texts"]="fts5 rejected the query: %s"%err.split(":",1)[1]
+        elif err.startswith("UNREADABLE:"): skipped["texts"]="text index unreadable (%s); %s"%(err.split(":",1)[1],REBUILD_HINT)
+        else: skipped["texts"]=err
+    # Every channel lists newest first (mail always has, texts is fetched that way above), so the
+    # merge sorts the same way and keeps the FIRST --limit rows -- the newest ones. Mail sorts
+    # before texts at the same second. `a.limit==0` is explicit rather than relying on `[:0]`
+    # meaning "none", which is what it does, matching the old `[-0:]`-avoidance here.
+    by_time=sorted(mail_rows+text_rows,
+                   key=lambda r:(-(r.get("timestamp") or 0), 0 if r.get("channel")=="mail" else 1))
+    merged=by_time[:a.limit] if a.limit>0 else []
+    extra={"content_trust":"untrusted"}
+    if skipped: extra["skipped"]=skipped
+    # Summary counts come from the final (post-cut) `merged`, not the pre-cut per-channel lists --
+    # otherwise the summary names rows that the cut just dropped and disagrees with `data`.
+    mail_n=sum(1 for r in merged if r.get("channel")=="mail")
+    return _search_emit(merged,"%d results (%d mail, %d texts)"%(len(merged),mail_n,len(merged)-mail_n),a.json,**extra)
 def cmd_box(a):
     if a.name not in BOXES: return out_err("USAGE","unknown box: %s"%a.name,"boxes: "+", ".join(BOXES))
     q=BOXES[a.name] if a.account=="all" else "(%s) and %s"%(BOXES[a.name],acct_q(a.account))
@@ -169,7 +300,8 @@ def _master_aggregate(row, now=None):
     import sqlite3, time
     if now is None: now=time.time()
     emails=[e.strip().lower() for e in (row["emails"] or "").split() if e.strip()]
-    phones=[p for p in (row["phones"] or "").split() if p]
+    # One stored value per line, each whole: a formatted number holds spaces of its own.
+    phones=[p.strip() for p in (row["phones"] or "").splitlines() if p.strip()]
     sources=[s for s in (row["sources"] or "").split() if s]
     sent=recv=total=0; last=0; person_file=None; account=None; cdb_name=None
     cdb=CFG.store_path("contacts.db")
@@ -719,7 +851,9 @@ def cmd_mcp(a):
         try: return json.loads(r.stdout)
         except Exception: return {"ok":False,"error":(r.stdout or r.stderr)[:400]}
     TOOLS=[
-      {"name":"search","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"Keyword search over the local mail replica (notmuch query).","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"account":{"type":"string","enum":ACCOUNTS+["all"]},"limit":{"type":"integer"}},"required":["query"]}},
+      {"name":"search","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"Keyword search over the local mail replica (notmuch query) and/or the local text index. Every channel -- mail, texts, or the merged 'all' default -- lists its rows newest first. Texts and the merged 'all' channel carry content_trust untrusted. account narrows mail only: texts belong to no account, so an account other than all answers from that account's mail and names texts as skipped.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"account":{"type":"string","enum":ACCOUNTS+["all"]},"limit":{"type":"integer"},"channel":{"type":"string","enum":["mail","texts","all"]}},"required":["query"]}},
+      {"name":"conversation","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"One person's mail and texts merged into a single timeline, oldest first. Carries content_trust untrusted (message text is somebody else's words).","inputSchema":{"type":"object","properties":{"person":{"type":"string"},"since":{"type":"string"},"until":{"type":"string"},"limit":{"type":"integer"},"channels":{"type":"string"}},"required":["person"]}},
+      {"name":"relationship","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"One relationship's dynamics across mail and texts: counts, first/last contact, initiation, streaks, gaps, double texts, heatmap.","inputSchema":{"type":"object","properties":{"person":{"type":"string"},"since":{"type":"string"},"until":{"type":"string"},"gap":{"type":"integer"},"follow_up":{"type":"integer"},"tz":{"type":"string"}},"required":["person"]}},
       {"name":"semantic","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"Meaning-based search across every mailbox (local embeddings).","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"account":{"type":"string"},"since":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]}},
       {"name":"box","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"List a box: imbox|feed|fins|paper-trail|reply-later.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"account":{"type":"string"},"limit":{"type":"integer"}},"required":["name"]}},
       {"name":"thread","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"Read a thread as markdown by thread id.","inputSchema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}},
@@ -732,7 +866,7 @@ def cmd_mcp(a):
     ]
     def dispatch(name,args):
         a_=args or {}
-        if name=="search": return run(["search",a_["query"],"--account",a_.get("account","all"),"--limit",str(a_.get("limit",25))])
+        if name=="search": return run(["search",a_["query"],"--account",a_.get("account","all"),"--limit",str(a_.get("limit",25)),"--channel",a_.get("channel","all")])
         if name=="semantic":
             xa=["semantic",a_["query"],"--account",a_.get("account","all"),"--limit",str(a_.get("limit",10))]+(["--since",a_["since"]] if a_.get("since") else []); return run(xa)
         if name=="box": return run(["box",a_["name"],"--account",a_.get("account","all"),"--limit",str(a_.get("limit",25))])
@@ -741,6 +875,16 @@ def cmd_mcp(a):
         if name=="tag": return run(["tag",a_["id"],*a_["ops"]])
         if name=="reply_draft": return run(["reply",a_["id"],"-m",a_["body"]])
         if name=="day": return run_bin("exo-day",["--json"])
+        if name=="conversation":
+            xa=[a_["person"]]
+            for k,fl in (("since","--since"),("until","--until"),("limit","--limit"),("channels","--channels")):
+                if a_.get(k) is not None: xa+=[fl,str(a_[k])]
+            return run_bin("exo-mesh-conversation",xa)
+        if name=="relationship":
+            xa=[a_["person"]]
+            for k,fl in (("since","--since"),("until","--until"),("gap","--gap"),("follow_up","--follow-up"),("tz","--tz")):
+                if a_.get(k) is not None: xa+=[fl,str(a_[k])]
+            return run_bin("exo-mesh-relationship",xa)
         if name=="since":
             xa=[]
             for k,fl in (("since","--since"),("horizon","--horizon"),("include","--include"),("min_signal","--min-signal")):
@@ -831,7 +975,7 @@ def cmd_doctor(a):
     if _job:
         c["sync_job"]="loaded" if _job in subprocess.run(["launchctl","list"],capture_output=True,text=True).stdout else "NOT LOADED"
     for b in ("feed","fins","vip","updates","needs-reply"): c[b]=int(subprocess.run([NOTMUCH,"count","tag:exo/%s"%b],capture_output=True,text=True).stdout.strip() or 0)
-    # --- H3 hardening: freshness + coverage + deps (what actually breaks) ---
+    # --- hardening: freshness + coverage + deps (what actually breaks) ---
     import time as _t, datetime as _dt
     now=_t.time()
     AUD=CFG.store_path("audit.jsonl")
@@ -939,6 +1083,8 @@ def main():
         ("doctor",cmd_doctor,(),         "prove the whole replica is healthy before you rely on it")]:
         sp=sub.add_parser(name,parents=[common],help=helptext)
         for e in extra: sp.add_argument(e)
+        if name=="search": sp.add_argument("--channel",choices=["mail","texts","all"],default="all",
+                                            help="mail | texts | all (default: all, merged by date)")
         sp.set_defaults(fn=fn)
     sem=sub.add_parser("semantic",parents=[common], help="find it when you remember the gist but not the words"); sem.add_argument("query"); sem.add_argument("--since"); sem.set_defaults(fn=cmd_semantic)
     co=sub.add_parser("contact",parents=[common], help="see where a relationship stands across every channel (list/show/search/drift)"); co.add_argument("action",choices=["list","show","search","drift"]); co.add_argument("target",nargs="?"); co.add_argument("--days",type=int,default=90); co.set_defaults(fn=cmd_contact)

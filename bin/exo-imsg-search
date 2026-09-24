@@ -7,17 +7,28 @@ relationship about"; they dilute short phrases across a multi-topic day. This is
 the other half: FTS5 over INDIVIDUAL messages, so a remembered phrase resolves.
 
   exo-imsg-search --build            rebuild the FTS index from snapshot.db
+  exo-imsg-search --refresh          index only messages above the last cursor
   exo-imsg-search "around in 20"     phrase search
   exo-imsg-search -n 30 invoice draft  term search
+
+Recovered text (a message with no `text` but a decodable packed `attributedBody`)
+is indexed exactly like a plain-text message: see imsg_text.py. Reactions
+(associated_message_type 2000-3999) are never indexed as messages.
 """
-import os, re, sqlite3, sys, time, datetime
+import json, os, re, sqlite3, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import exomail_config as CFG
+import imsg_text
+from mesh_person import phones_of
 
 SNAP=CFG.store_path("imessage", "snapshot.db")
 FTS =CFG.store_path("imessage", "fts.db")
+STATE=CFG.store_path("imessage", ".state.imessage.json")
 MASTER=CFG.store_path("contacts-master.db")
 APPLE_EPOCH=978307200
+REACTION_LO, REACTION_HI = 2000, 3999   # tapback add/remove range; never a message
+
+FTS_SCHEMA = "CREATE VIRTUAL TABLE msg USING fts5(text, handle UNINDEXED, day UNINDEXED, ts UNINDEXED, svc UNINDEXED, me UNINDEXED)"
 
 def digits(s): return re.sub(r"\D","",s or "")
 
@@ -26,12 +37,12 @@ def name_map():
     if not os.path.exists(MASTER): return m
     c=sqlite3.connect(f"file:{MASTER}?mode=ro",uri=True)
     for name,emails,phones in c.execute("select name,emails,phones from master where name is not null"):
-        for e in (emails or "").replace(";",",").split(","):
+        # Every value on the card names it: emails are space-joined, phones one value per line,
+        # keyed by the resolver's own rule so a text is named by the card its identity is.
+        for e in re.split(r"[\s,;]+",emails or ""):
             e=e.strip().lower()
             if "@" in e: m.setdefault(e,name)
-        for p in (phones or "").replace(";",",").split(","):
-            d=digits(p)
-            if len(d)>=10: m.setdefault(d[-10:],name)
+        for k in phones_of(phones): m.setdefault(k,name)
     c.close(); return m
 
 def resolve(h,nm):
@@ -40,37 +51,136 @@ def resolve(h,nm):
     d=digits(h)
     return nm.get(d[-10:],h) if len(d)>=10 else h
 
-def build():
-    if not os.path.exists(SNAP): print("no snapshot -- run `exo-imsg snapshot`",file=sys.stderr); return 2
-    t0=time.time(); tmp=FTS+".tmp"
-    if os.path.exists(tmp): os.remove(tmp)
-    con=sqlite3.connect(tmp)
-    con.execute("CREATE VIRTUAL TABLE msg USING fts5(text, handle UNINDEXED, day UNINDEXED, svc UNINDEXED, me UNINDEXED)")
-    s=sqlite3.connect(f"file:{SNAP}?mode=ro",uri=True)
-    # Sent messages have handle_id=0 -- they reach their counterparty only through
-    # chat_message_join. A plain `join handle` silently drops ~102k outgoing messages.
-    rows=s.execute(f"""select m.text,
-        coalesce(nullif(c.chat_identifier,''), h.id) as counterparty,
+def _load_state():
+    """→ (state, error). error is None on success -- including an ABSENT file, which is {} (a
+    fresh cursor) -- and non-None only when the file EXISTS but could not be parsed. Callers must
+    treat a non-None error as fatal and never write a state file back in that case: this file is
+    shared with exo-imsg, and papering over a bad read with {} (the old behaviour) meant the next
+    write dropped exo-imsg's own keys (last_rowid, runs) instead of failing loud."""
+    if not os.path.exists(STATE):
+        return {}, None
+    try:
+        with open(STATE) as f: return json.load(f), None
+    except Exception as e:
+        return None, str(e)
+
+def _save_state(st):
+    tmp = STATE + ".tmp"
+    with open(tmp, "w") as f: json.dump(st, f, indent=2)
+    os.replace(tmp, STATE)   # atomic, and never clobbers keys exo-imsg owns (last_rowid, runs)
+
+def _snapshot_rows(con, after_rowid):
+    """Every message row with ROWID > after_rowid, one row per message (a chat can join more than
+    once), oldest first. Sent messages carry handle_id=0 and reach their counterparty only through
+    chat_message_join -- a plain join on handle alone silently drops them."""
+    return con.execute(f"""select m.ROWID,
+        imsg_text(m.text, m.attributedBody),
+        coalesce(nullif(c.chat_identifier,''), h.id),
         date(datetime(m.date/1000000000 + {APPLE_EPOCH},'unixepoch')),
-        m.service, m.is_from_me
+        cast(m.date/1000000000 + {APPLE_EPOCH} as integer),
+        m.service, m.is_from_me, m.associated_message_type
         from message m
         left join chat_message_join cmj on cmj.message_id=m.ROWID
         left join chat c on c.ROWID=cmj.chat_id
         left join handle h on h.ROWID=m.handle_id
-        where m.associated_message_type=0 and coalesce(m.text,'')<>''
-        group by m.ROWID""")
-    n=0
-    for batch in iter(lambda: rows.fetchmany(5000), []):
-        con.executemany("INSERT INTO msg(text,handle,day,svc,me) VALUES(?,?,?,?,?)", batch)
-        n+=len(batch)
+        where m.ROWID > ?
+        group by m.ROWID
+        order by m.ROWID""", (after_rowid,))
+
+def _read_and_split(after_rowid):
+    """→ (batch, max_rowid_read). batch excludes reactions; max_rowid_read covers every ROWID this
+    pass looked at (reactions included), so a reaction-only tail still advances the cursor past it."""
+    if not os.path.exists(SNAP):
+        return None, None
+    s=sqlite3.connect(f"file:{SNAP}?mode=ro",uri=True)
+    imsg_text.register(s)
+    batch=[]; max_seen=after_rowid
+    for rowid,txt,handle,day,ts_,svc,me,amt in _snapshot_rows(s, after_rowid):
+        max_seen = max(max_seen, rowid)
+        if amt and REACTION_LO <= amt <= REACTION_HI:
+            continue
+        batch.append((rowid, txt, handle, day, ts_, svc, me))
+    s.close()
+    return batch, max_seen
+
+def build():
+    if not os.path.exists(SNAP): print("no snapshot -- run `exo-imsg snapshot`",file=sys.stderr); return 2
+    st, err = _load_state()
+    if err is not None:
+        print(f"state file {STATE} exists but could not be read ({err}) -- refusing to touch it; "
+              "repair or remove it, then re-run", file=sys.stderr)
+        return 2
+    t0=time.time()
+    batch, max_seen = _read_and_split(0)
+    tmp=FTS+".tmp"
+    if os.path.exists(tmp): os.remove(tmp)
+    con=sqlite3.connect(tmp)
+    con.execute(FTS_SCHEMA)
+    if batch:
+        con.executemany("INSERT INTO msg(rowid,text,handle,day,ts,svc,me) VALUES(?,?,?,?,?,?,?)", batch)
     con.commit(); con.execute("INSERT INTO msg(msg) VALUES('optimize')"); con.commit()
-    con.close(); s.close(); os.replace(tmp,FTS)
+    con.close(); os.replace(tmp,FTS)
+    # A state file built from scratch here always carries exo-imsg's own default keys alongside
+    # fts_rowid (setdefault: never overwrites a key already present), so exo-imsg's own cursor
+    # check (st["last_rowid"], not .get) never KeyErrors on the very next real snapshot.
+    st.setdefault("last_rowid", 0); st.setdefault("runs", 0)
+    st["fts_rowid"]=max_seen if max_seen is not None else 0; _save_state(st)
     mb=os.path.getsize(FTS)/1048576
-    print(f"  fts: {n:,} messages · {mb:.1f} MB · {time.time()-t0:.1f}s")
+    print(f"  fts: {len(batch):,} messages · {mb:.1f} MB · {time.time()-t0:.1f}s")
+    return 0
+
+def refresh():
+    """Incremental by row id: read only snapshot rows above the recorded fts_rowid
+    cursor, index each once under its own message ROWID, skip reactions, advance the cursor to the
+    highest ROWID read. A row at or below the cursor is never read again, even if its text later
+    changed in place -- `--build` is the only way to re-read it. With no fts.db or no recorded
+    cursor, this reads every row (equivalent to --build).
+
+    The incremental insert uses INSERT OR REPLACE (FTS5 honours the rowid conflict), so a saved
+    cursor that has fallen behind what fts.db already holds -- a crash between the FTS commit and
+    the state save, a restored/older state file, a swapped fts.db -- re-indexes the overlap in
+    place instead of raising sqlite3.IntegrityError on the duplicate rowid and wedging every later
+    refresh. Any other DB error falls back to a full rebuild rather than failing the sync forever."""
+    if not os.path.exists(SNAP): print("no snapshot -- run `exo-imsg snapshot`",file=sys.stderr); return 2
+    st, err = _load_state()
+    if err is not None:
+        print(f"state file {STATE} exists but could not be read ({err}) -- refusing to touch it; "
+              "repair or remove it, then re-run", file=sys.stderr)
+        return 2
+    cursor=st.get("fts_rowid")
+    fresh = cursor is None or not os.path.exists(FTS)
+    after = 0 if fresh else cursor
+    batch, max_seen = _read_and_split(after)
+    if batch is None:   # snapshot vanished between the exists() check and the read; report, don't crash
+        print("no snapshot -- run `exo-imsg snapshot`",file=sys.stderr); return 2
+    if fresh:
+        tmp=FTS+".tmp"
+        if os.path.exists(tmp): os.remove(tmp)
+        con=sqlite3.connect(tmp)
+        con.execute(FTS_SCHEMA)
+        if batch:
+            con.executemany("INSERT INTO msg(rowid,text,handle,day,ts,svc,me) VALUES(?,?,?,?,?,?,?)", batch)
+        con.commit(); con.execute("INSERT INTO msg(msg) VALUES('optimize')"); con.commit()
+        con.close(); os.replace(tmp,FTS)
+    elif batch:
+        con=sqlite3.connect(FTS)
+        try:
+            con.executemany("INSERT OR REPLACE INTO msg(rowid,text,handle,day,ts,svc,me) VALUES(?,?,?,?,?,?,?)", batch)
+            con.commit()
+        except (sqlite3.IntegrityError, sqlite3.DatabaseError) as e:
+            con.close()
+            print(f"  fts refresh: incremental insert failed ({e}) -- the cursor is likely behind "
+                  "fts.db; falling back to a full rebuild", file=sys.stderr)
+            return build()
+        con.close()
+    st.setdefault("last_rowid", 0); st.setdefault("runs", 0)
+    st["fts_rowid"]=max_seen if max_seen is not None else after
+    _save_state(st)
+    print(f"  fts refresh: +{len(batch)} message(s) above rowid {after} · cursor now {st['fts_rowid']:,}")
     return 0
 
 def search(q,limit):
-    if not os.path.exists(FTS): print("no fts index -- run `exo-imsg-search --build`",file=sys.stderr); return 2
+    if not os.path.exists(FTS): print("no fts index -- run `exo-imsg-search --build` (or --refresh)",file=sys.stderr); return 2
     con=sqlite3.connect(f"file:{FTS}?mode=ro",uri=True); nm=name_map()
     try:
         rows=con.execute("""select day,handle,svc,me,text,rank from msg
@@ -90,6 +200,7 @@ if __name__=="__main__":
     a=sys.argv[1:]
     if not a or a[0] in ("-h","--help"): print(DOC); sys.exit(0)
     if a[0]=="--build": sys.exit(build())
+    if a[0]=="--refresh": sys.exit(refresh())
     limit=20
     if a[0]=="-n": limit=int(a[1]); a=a[2:]
     q=" ".join(a)

@@ -62,7 +62,15 @@ done
 # incremental semantic embed of new mail (skips already-embedded)
 step index    "$BIN/exo-mail-index"
 step calendar "$BIN/exo-cal" pull-all
-step imessage "$BIN/exo-imsg" snapshot
+# GATED EDIT: step() logs a failure and still returns 0, so chaining the index
+# refresh after `step imessage ...` would refresh even after a failed snapshot. The refresh runs
+# only when the snapshot itself exited 0 -- an explicit status check, not the step() wrapper.
+# Either branch still runs every step after it and the sync still exits 0.
+if "$BIN/exo-imsg" snapshot >>"$LOG" 2>&1; then
+  step imsg-index "$BIN/exo-imsg-search" --refresh
+else
+  echo "$(date '+%F %T') imessage step failed; imsg-index refresh skipped" >>"$LOG"
+fi
 step mesh-resolve "$BIN/exo-mesh-resolve"
 # Drift must not nudge about relationships that ENDED. Dry run by default: review a
 # week of proposals first, then add --apply once you trust what it finds.

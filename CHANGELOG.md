@@ -4,6 +4,10 @@ Releases of exo-mesh. Each entry names the source commit it was exported from.
 
 ---
 
+## [2026-09-24] — v0.4.0 — Mesh v1: one record per person across mail, iMessage and calendar, with conversation and relationship views; the day view reports what it cannot read as unknown; the data-flow chart uses the standard palette
+- Source commit: 0c3c300
+
+
 ## [2026-09-24] — v0.3.4 — the data-flow chart uses the OPAQUE node types: Sand external sources, a green security boundary, one focal pair
 - Source commit: 8fc8164
 
