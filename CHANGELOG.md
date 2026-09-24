@@ -4,6 +4,10 @@ Releases of exo-mesh. Each entry names the source commit it was exported from.
 
 ---
 
+## [2026-09-23] — v0.3.2 — the README frames the governance link as building verifiable security and governance into AI agents
+- Source commit: 5a622b1
+
+
 ## [2026-09-23] — v0.3.1 — the README links the study guide on running an unattended agent that reads your mail inside a kernel sandbox
 - Source commit: db5906f
 
