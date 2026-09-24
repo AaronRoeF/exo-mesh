@@ -4,6 +4,10 @@ Releases of exo-mesh. Each entry names the source commit it was exported from.
 
 ---
 
+## [2026-09-23] — v0.3.1 — the README links the study guide on running an unattended agent that reads your mail inside a kernel sandbox
+- Source commit: db5906f
+
+
 ## [2026-09-20] — v0.3.0 — since: what changed in your relationships this week — new people, drifted people, meetings ahead — in one read; every meeting on your day arrives with who is in the room and where each relationship stands; the owner never becomes an identity through either seeding door
 - Source commit: 27acfc9
 

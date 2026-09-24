@@ -34,6 +34,11 @@ person, which the CLI and MCP server read — nothing leaves the machine.](asset
 
 I'm leaving out big parts of my implementation because I'm not interested in disclosing all the specifics of my security and governance setup. You can see parts of what I'm doing here: agentrust-io.com if you're interested. And generally assume this is a project I'm sharing, not a product. I hope you get value. Enjoy! 
 
+> **Study guide: [Let AI agents run unattended without giving them the keys to your laptop](https://github.com/AaronRoeF/exo/blob/main/docs/study-guide-governed-agents.md).**
+> How an unattended agent that reads my mail runs inside a kernel sandbox, under Agent Manifest
+> and TRACE, that keeps it out of this replica. Written for technical executives; lives in the exo
+> repo.
+
 ---
 
 ## What you get
@@ -129,6 +134,7 @@ mail root are read from `notmuch config`, which you set up anyway.
 | [06-COMMANDS.md](docs/06-COMMANDS.md) | Every command and what it gets you — the reference. |
 | [07-WHAT-THIS-MAKES-POSSIBLE.md](docs/07-WHAT-THIS-MAKES-POSSIBLE.md) | Seven things a local relationship mesh makes possible — five that work, two that do not exist yet. |
 | [AGENTS.md](AGENTS.md) | Reading this as an agent? Start there — MCP tools, JSON contract, exit codes, what writes. |
+| [Let AI agents run unattended without giving them the keys to your laptop](https://github.com/AaronRoeF/exo/blob/main/docs/study-guide-governed-agents.md) | A study guide: how an unattended agent that reads mail runs inside a kernel sandbox that keeps it out of this replica. Lives in the exo repo. |
 
 ---
 
