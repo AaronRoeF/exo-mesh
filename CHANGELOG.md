@@ -4,6 +4,10 @@ Releases of exo-mesh. Each entry names the source commit it was exported from.
 
 ---
 
+## [2026-09-24] — v0.3.3 — the data-flow chart uses the OPAQUE palette
+- Source commit: 60b25dd
+
+
 ## [2026-09-23] — v0.3.2 — the README frames the governance link as building verifiable security and governance into AI agents
 - Source commit: 5a622b1
 

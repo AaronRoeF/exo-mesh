@@ -3,89 +3,89 @@
   <title id="exo-mesh-title">exo-mesh: four channels resolved into one person record</title>
   <desc id="exo-mesh-desc">Data-flow diagram. Mail, calendar, iMessage and contacts are pulled into local replicas on your own machine, where a resolver joins them by email, phone and name into a mesh database holding one row per person, which the command line and MCP server read. Arrows run inbound only; nothing leaves the machine.</desc>
   <defs>
-    <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
-    <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
-    <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4a5058"/></marker>
+    <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#10ba87"/></marker>
+    <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#00b0ff"/></marker>
   </defs>
-  <rect width="100%" height="100%" fill="#f5f5f5"/>
-  <text x="40" y="44" fill="#7a8399" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" letter-spacing="0.14em">EXO-MESH · LOCAL-FIRST DATA FLOW</text>
-  <text x="40" y="76" fill="#2d3142" font-size="28" font-family="'Instrument Serif', Georgia, 'Times New Roman', serif">Four channels in. One person out.</text>
-  <text x="40" y="100" fill="#4f5d75" font-size="12" font-family="'Geist', -apple-system, 'Helvetica Neue', Arial, sans-serif">The whole relationship in one record — not the fragment one inbox remembers.</text>
-  <rect x="272" y="124" width="712" height="372" rx="8" fill="rgba(235,108,54,0.05)" stroke="rgba(235,108,54,0.50)" stroke-width="1" stroke-dasharray="4,4"/>
-  <text x="288" y="488" fill="#eb6c36" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" letter-spacing="0.14em">YOUR MACHINE — NOTHING LEAVES</text>
-  <line x1="220" y1="204" x2="300" y2="204" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-  <line x1="220" y1="284" x2="300" y2="284" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-  <line x1="220" y1="364" x2="300" y2="364" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-  <line x1="220" y1="444" x2="300" y2="444" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-  <line x1="480" y1="308" x2="540" y2="308" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-  <rect x="490" y="288" width="36" height="12" rx="2" fill="#f5f5f5"/>
-  <text x="508" y="297" fill="#7a8399" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.06em">MATCH</text>
-  <line x1="720" y1="308" x2="780" y2="308" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-  <rect x="730" y="288" width="36" height="12" rx="2" fill="#f5f5f5"/>
-  <text x="748" y="297" fill="#7a8399" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.06em">WRITE</text>
-  <line x1="870" y1="356" x2="870" y2="404" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-  <rect x="880" y="374" width="32" height="12" rx="2" fill="#f5f5f5"/>
-  <text x="896" y="383" fill="#7a8399" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.06em">READ</text>
-  <rect x="40" y="176" width="180" height="56" rx="6" fill="#f5f5f5"/>
-  <rect x="40" y="176" width="180" height="56" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
-  <rect x="48" y="184" width="44" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.30)" stroke-width="0.8"/>
-  <text x="70" y="193" fill="#7a8399" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">MAIL</text>
-  <text x="130" y="210" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Gmail</text>
-  <text x="130" y="224" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">work + personal</text>
-  <rect x="40" y="256" width="180" height="56" rx="6" fill="#f5f5f5"/>
-  <rect x="40" y="256" width="180" height="56" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
-  <rect x="48" y="264" width="40" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.30)" stroke-width="0.8"/>
-  <text x="68" y="273" fill="#7a8399" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">CAL</text>
-  <text x="130" y="290" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Calendar</text>
-  <text x="130" y="304" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">every calendar</text>
-  <rect x="40" y="336" width="180" height="56" rx="6" fill="#f5f5f5"/>
-  <rect x="40" y="336" width="180" height="56" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
-  <rect x="48" y="344" width="44" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.30)" stroke-width="0.8"/>
-  <text x="70" y="353" fill="#7a8399" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">CHAT</text>
-  <text x="130" y="370" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">iMessage</text>
-  <text x="130" y="384" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">read-only snapshot</text>
-  <rect x="40" y="416" width="180" height="56" rx="6" fill="#f5f5f5"/>
-  <rect x="40" y="416" width="180" height="56" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
-  <rect x="48" y="424" width="40" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.30)" stroke-width="0.8"/>
-  <text x="68" y="433" fill="#7a8399" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">WHO</text>
-  <text x="130" y="450" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Contacts</text>
-  <text x="130" y="464" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">Apple + Google</text>
-  <rect x="300" y="140" width="180" height="336" rx="6" fill="#f5f5f5"/>
-  <rect x="300" y="140" width="180" height="336" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
-  <rect x="308" y="148" width="44" height="12" rx="2" fill="transparent" stroke="rgba(79,93,117,0.40)" stroke-width="0.8"/>
-  <text x="330" y="157" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">STORE</text>
-  <text x="390" y="176" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Local replicas</text>
-  <line x1="312" y1="188" x2="468" y2="188" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
-  <text x="390" y="208" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">Maildir + notmuch</text>
-  <text x="390" y="288" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">calendar.db</text>
-  <text x="390" y="368" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">snapshot.db</text>
-  <text x="390" y="448" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">contacts-master.db</text>
-  <rect x="540" y="260" width="180" height="96" rx="6" fill="#f5f5f5"/>
-  <rect x="540" y="260" width="180" height="96" rx="6" fill="rgba(235,108,54,0.10)" stroke="#eb6c36" stroke-width="1"/>
-  <rect x="548" y="268" width="40" height="12" rx="2" fill="transparent" stroke="rgba(235,108,54,0.40)" stroke-width="0.8"/>
-  <text x="568" y="277" fill="#eb6c36" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">JOIN</text>
-  <text x="630" y="308" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Identity resolver</text>
-  <text x="630" y="328" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">email · phone · name</text>
-  <rect x="780" y="260" width="180" height="96" rx="6" fill="#f5f5f5"/>
-  <rect x="780" y="260" width="180" height="96" rx="6" fill="rgba(235,108,54,0.10)" stroke="#eb6c36" stroke-width="1"/>
-  <rect x="788" y="268" width="28" height="12" rx="2" fill="transparent" stroke="rgba(235,108,54,0.40)" stroke-width="0.8"/>
-  <text x="802" y="277" fill="#eb6c36" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">DB</text>
-  <text x="870" y="308" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">The mesh</text>
-  <text x="870" y="328" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">mesh.db · one row/person</text>
-  <rect x="780" y="404" width="180" height="64" rx="6" fill="#f5f5f5"/>
-  <rect x="780" y="404" width="180" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
-  <rect x="788" y="412" width="40" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
-  <text x="808" y="421" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">READ</text>
-  <text x="870" y="444" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">CLI · MCP server</text>
-  <text x="870" y="460" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">search · drift · bedrock</text>
-  <line x1="40" y1="532" x2="960" y2="532" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
-  <text x="40" y="556" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" letter-spacing="0.14em">LEGEND</text>
-  <rect x="140" y="548" width="12" height="12" rx="2" fill="rgba(235,108,54,0.10)" stroke="#eb6c36" stroke-width="1"/>
-  <text x="160" y="556" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace">join + identity</text>
-  <rect x="320" y="548" width="12" height="12" rx="2" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
-  <text x="340" y="556" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace">local replica</text>
-  <rect x="500" y="548" width="12" height="12" rx="2" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
-  <text x="520" y="556" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace">external source</text>
-  <line x1="680" y1="554" x2="696" y2="554" stroke="#eb6c36" stroke-width="1" stroke-dasharray="4,4"/>
-  <text x="704" y="556" fill="#4f5d75" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace">trust boundary</text>
+  <rect width="100%" height="100%" fill="#f7f3f4"/>
+  <text x="40" y="44" fill="#6e747c" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" letter-spacing="0.14em">EXO-MESH · LOCAL-FIRST DATA FLOW</text>
+  <text x="40" y="76" fill="#1f2125" font-size="28" font-family="'Instrument Serif', Georgia, 'Times New Roman', serif">Four channels in. One person out.</text>
+  <text x="40" y="100" fill="#4a5058" font-size="12" font-family="'Geist', -apple-system, 'Helvetica Neue', Arial, sans-serif">The whole relationship in one record — not the fragment one inbox remembers.</text>
+  <rect x="272" y="124" width="712" height="372" rx="8" fill="#ebf0ef" stroke="#10ba87" stroke-width="1" stroke-dasharray="4,4"/>
+  <text x="288" y="488" fill="#1f2125" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" letter-spacing="0.14em">YOUR MACHINE — NOTHING LEAVES</text>
+  <line x1="220" y1="204" x2="300" y2="204" stroke="#4a5058" stroke-width="1" marker-end="url(#arrow)"/>
+  <line x1="220" y1="284" x2="300" y2="284" stroke="#4a5058" stroke-width="1" marker-end="url(#arrow)"/>
+  <line x1="220" y1="364" x2="300" y2="364" stroke="#4a5058" stroke-width="1" marker-end="url(#arrow)"/>
+  <line x1="220" y1="444" x2="300" y2="444" stroke="#4a5058" stroke-width="1" marker-end="url(#arrow)"/>
+  <line x1="480" y1="308" x2="540" y2="308" stroke="#4a5058" stroke-width="1" marker-end="url(#arrow)"/>
+  <rect x="490" y="288" width="36" height="12" rx="2" fill="#f7f3f4"/>
+  <text x="508" y="297" fill="#6e747c" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.06em">MATCH</text>
+  <line x1="720" y1="308" x2="780" y2="308" stroke="#4a5058" stroke-width="1" marker-end="url(#arrow)"/>
+  <rect x="730" y="288" width="36" height="12" rx="2" fill="#f7f3f4"/>
+  <text x="748" y="297" fill="#6e747c" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.06em">WRITE</text>
+  <line x1="870" y1="356" x2="870" y2="404" stroke="#4a5058" stroke-width="1" marker-end="url(#arrow)"/>
+  <rect x="880" y="374" width="32" height="12" rx="2" fill="#f7f3f4"/>
+  <text x="896" y="383" fill="#6e747c" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.06em">READ</text>
+  <rect x="40" y="176" width="180" height="56" rx="6" fill="#f7f3f4"/>
+  <rect x="40" y="176" width="180" height="56" rx="6" fill="#f1edee" stroke="#b2b0b2" stroke-width="1"/>
+  <rect x="48" y="184" width="44" height="12" rx="2" fill="transparent" stroke="#b2b0b2" stroke-width="0.8"/>
+  <text x="70" y="193" fill="#6e747c" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">MAIL</text>
+  <text x="130" y="210" fill="#1f2125" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Gmail</text>
+  <text x="130" y="224" fill="#4a5058" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">work + personal</text>
+  <rect x="40" y="256" width="180" height="56" rx="6" fill="#f7f3f4"/>
+  <rect x="40" y="256" width="180" height="56" rx="6" fill="#f1edee" stroke="#b2b0b2" stroke-width="1"/>
+  <rect x="48" y="264" width="40" height="12" rx="2" fill="transparent" stroke="#b2b0b2" stroke-width="0.8"/>
+  <text x="68" y="273" fill="#6e747c" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">CAL</text>
+  <text x="130" y="290" fill="#1f2125" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Calendar</text>
+  <text x="130" y="304" fill="#4a5058" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">every calendar</text>
+  <rect x="40" y="336" width="180" height="56" rx="6" fill="#f7f3f4"/>
+  <rect x="40" y="336" width="180" height="56" rx="6" fill="#f1edee" stroke="#b2b0b2" stroke-width="1"/>
+  <rect x="48" y="344" width="44" height="12" rx="2" fill="transparent" stroke="#b2b0b2" stroke-width="0.8"/>
+  <text x="70" y="353" fill="#6e747c" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">CHAT</text>
+  <text x="130" y="370" fill="#1f2125" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">iMessage</text>
+  <text x="130" y="384" fill="#4a5058" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">read-only snapshot</text>
+  <rect x="40" y="416" width="180" height="56" rx="6" fill="#f7f3f4"/>
+  <rect x="40" y="416" width="180" height="56" rx="6" fill="#f1edee" stroke="#b2b0b2" stroke-width="1"/>
+  <rect x="48" y="424" width="40" height="12" rx="2" fill="transparent" stroke="#b2b0b2" stroke-width="0.8"/>
+  <text x="68" y="433" fill="#6e747c" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">WHO</text>
+  <text x="130" y="450" fill="#1f2125" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Contacts</text>
+  <text x="130" y="464" fill="#4a5058" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">Apple + Google</text>
+  <rect x="300" y="140" width="180" height="336" rx="6" fill="#f7f3f4"/>
+  <rect x="300" y="140" width="180" height="336" rx="6" fill="#ece9ea" stroke="#4a5058" stroke-width="1"/>
+  <rect x="308" y="148" width="44" height="12" rx="2" fill="transparent" stroke="#abacb0" stroke-width="0.8"/>
+  <text x="330" y="157" fill="#4a5058" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">STORE</text>
+  <text x="390" y="176" fill="#1f2125" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Local replicas</text>
+  <line x1="312" y1="188" x2="468" y2="188" stroke="#e1dedf" stroke-width="0.8"/>
+  <text x="390" y="208" fill="#4a5058" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">Maildir + notmuch</text>
+  <text x="390" y="288" fill="#4a5058" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">calendar.db</text>
+  <text x="390" y="368" fill="#4a5058" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">snapshot.db</text>
+  <text x="390" y="448" fill="#4a5058" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">contacts-master.db</text>
+  <rect x="540" y="260" width="180" height="96" rx="6" fill="#f7f3f4"/>
+  <rect x="540" y="260" width="180" height="96" rx="6" fill="#ebf5f1" stroke="#10ba87" stroke-width="1"/>
+  <rect x="548" y="268" width="40" height="12" rx="2" fill="transparent" stroke="#10ba87" stroke-width="0.8"/>
+  <text x="568" y="277" fill="#1f2125" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">JOIN</text>
+  <text x="630" y="308" fill="#1f2125" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">Identity resolver</text>
+  <text x="630" y="328" fill="#4a5058" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">email · phone · name</text>
+  <rect x="780" y="260" width="180" height="96" rx="6" fill="#f7f3f4"/>
+  <rect x="780" y="260" width="180" height="96" rx="6" fill="#ebf5f1" stroke="#10ba87" stroke-width="1"/>
+  <rect x="788" y="268" width="28" height="12" rx="2" fill="transparent" stroke="#10ba87" stroke-width="0.8"/>
+  <text x="802" y="277" fill="#1f2125" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">DB</text>
+  <text x="870" y="308" fill="#1f2125" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">The mesh</text>
+  <text x="870" y="328" fill="#4a5058" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">mesh.db · one row/person</text>
+  <rect x="780" y="404" width="180" height="64" rx="6" fill="#f7f3f4"/>
+  <rect x="780" y="404" width="180" height="64" rx="6" fill="#fefafa" stroke="#1f2125" stroke-width="1"/>
+  <rect x="788" y="412" width="40" height="12" rx="2" fill="transparent" stroke="#a5a3a5" stroke-width="0.8"/>
+  <text x="808" y="421" fill="#4a5058" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle" letter-spacing="0.08em">READ</text>
+  <text x="870" y="444" fill="#1f2125" font-size="12" font-weight="600" font-family="'Geist', -apple-system, 'Helvetica Neue', Arial, sans-serif" text-anchor="middle">CLI · MCP server</text>
+  <text x="870" y="460" fill="#4a5058" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" text-anchor="middle">search · drift · bedrock</text>
+  <line x1="40" y1="532" x2="960" y2="532" stroke="#e1dedf" stroke-width="0.8"/>
+  <text x="40" y="556" fill="#4a5058" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace" letter-spacing="0.14em">LEGEND</text>
+  <rect x="140" y="548" width="12" height="12" rx="2" fill="#ebf5f1" stroke="#10ba87" stroke-width="1"/>
+  <text x="160" y="556" fill="#4a5058" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace">join + identity</text>
+  <rect x="320" y="548" width="12" height="12" rx="2" fill="#ece9ea" stroke="#4a5058" stroke-width="1"/>
+  <text x="340" y="556" fill="#4a5058" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace">local replica</text>
+  <rect x="500" y="548" width="12" height="12" rx="2" fill="#f1edee" stroke="#b2b0b2" stroke-width="1"/>
+  <text x="520" y="556" fill="#4a5058" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace">external source</text>
+  <line x1="680" y1="554" x2="696" y2="554" stroke="#10ba87" stroke-width="1" stroke-dasharray="4,4"/>
+  <text x="704" y="556" fill="#4a5058" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace">trust boundary</text>
 </svg>
