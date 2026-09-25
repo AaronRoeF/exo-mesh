@@ -4,6 +4,10 @@ Releases of exo-mesh. Each entry names the source commit it was exported from.
 
 ---
 
+## [2026-09-25] — v0.4.1 — Readers wait up to 30 s for the sync's writes instead of failing with 'database is locked' (exo-cal and the mesh resolver)
+- Source commit: 1cb1275
+
+
 ## [2026-09-24] — v0.4.0 — Mesh v1: one record per person across mail, iMessage and calendar, with conversation and relationship views; the day view reports what it cannot read as unknown; the data-flow chart uses the standard palette
 - Source commit: 0c3c300
 

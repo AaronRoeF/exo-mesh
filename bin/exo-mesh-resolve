@@ -61,7 +61,7 @@ def imsg_by_counterparty():
     (the smallest string when several map to one key), so a text-only identity is named with it."""
     if not os.path.exists(SNAP):   # tolerated like calendar.db: an absent optional store is an empty channel
         return {}, 0
-    c = sqlite3.connect("file:%s?mode=ro" % SNAP, uri=True)
+    c = sqlite3.connect("file:%s?mode=ro" % SNAP, uri=True, timeout=30)
     part = {}
     for cid, hid in c.execute("SELECT chj.chat_id, h.id FROM chat_handle_join chj JOIN handle h ON h.ROWID=chj.handle_id"):
         part.setdefault(cid, set()).add(hid)
@@ -96,7 +96,7 @@ def imsg_by_counterparty():
     return agg, reactions
 
 def email_stats():
-    c = sqlite3.connect("file:%s?mode=ro" % CONTACTS, uri=True)
+    c = sqlite3.connect("file:%s?mode=ro" % CONTACTS, uri=True, timeout=30)
     out = {}
     pf = CFG.col_of(c, "people", "person_file") or "NULL"
     nm = CFG.col_of(c, "people", "name") or "NULL"
@@ -114,7 +114,7 @@ def cal_by_counterparty():
     if not os.path.exists(CAL):
         return {}
     now = time.time()
-    c = sqlite3.connect("file:%s?mode=ro" % CAL, uri=True)
+    c = sqlite3.connect("file:%s?mode=ro" % CAL, uri=True, timeout=30)
     agg = {}
     # PAST meetings only — a future recurring instance isn't "last contact" yet,
     # else max(start) grabs a meeting scheduled a year out (caught in TEST 6/7).
@@ -141,7 +141,7 @@ def main():
     im, reactions_excluded = imsg_by_counterparty()
     es = email_stats()
     cal = cal_by_counterparty()
-    m = sqlite3.connect("file:%s?mode=ro" % MASTER, uri=True)
+    m = sqlite3.connect("file:%s?mode=ro" % MASTER, uri=True, timeout=30)
     # The merge marks the master it writes, in two halves: user_version 2 on the store, and a
     # phones_format column on the master table. Both must be there. The old merge rewrites the table
     # in place and never touches user_version, which lives in the file's header, so run after the new
@@ -265,7 +265,7 @@ def main():
     multi = [r for r in rows if len(r["channels"].split("+")) >= 2]
 
     if not testmode:
-        con = sqlite3.connect(MESH)
+        con = sqlite3.connect(MESH, timeout=30)
         con.execute("DROP TABLE IF EXISTS identity")
         con.execute("""CREATE TABLE identity(id INTEGER PRIMARY KEY, name TEXT, emails TEXT, phones TEXT,
             person_file TEXT, email_last REAL, email_count INT, email_sent INT, email_recv INT, email_first REAL,

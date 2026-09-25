@@ -58,7 +58,7 @@ WINDOW_FUTURE_DAYS = 365
 
 def db():
     os.makedirs(os.path.dirname(DB), exist_ok=True)
-    c = sqlite3.connect(DB)
+    c = sqlite3.connect(DB, timeout=30)          # the sync rewrites this store; wait, never crash (2026-09-24)
     c.execute("""CREATE TABLE IF NOT EXISTS events(
         uid TEXT PRIMARY KEY, source TEXT, calendar TEXT, title TEXT, start REAL, "end" REAL,
         all_day INT, location TEXT, organizer TEXT, attendees TEXT, status TEXT, updated REAL)""")
@@ -166,7 +166,7 @@ def pull_apple():
     src = os.path.expanduser("~/Library/Group Containers/group.com.apple.calendar/Calendar.sqlitedb")
     if not os.path.exists(src): print("Apple Calendar db not found"); return 2
     cutoff = time.time() - WINDOW_PAST_DAYS * 86400 - COCOA  # cocoa-epoch cutoff
-    ac = sqlite3.connect("file:%s?mode=ro" % src, uri=True)
+    ac = sqlite3.connect("file:%s?mode=ro" % src, uri=True, timeout=30)
     q = """SELECT ci.ROWID, ci.summary, ci.start_date, ci.end_date, ci.all_day, ci.status,
            ci.location_id, cal.title
            FROM CalendarItem ci LEFT JOIN Calendar cal ON ci.calendar_id = cal.ROWID
