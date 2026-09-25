@@ -31,6 +31,7 @@ success, `{ok:false, error, code, hint, retryable}` on failure. Typed exit codes
 - `exo-mail contact list` — top two-way relationships by volume.
 - `exo-mail contact show <name|email>` — stats, who-initiates, linked person file, recent threads.
 - `exo-mail contact drift --days 120` — real relationships gone quiet; use for "who am I neglecting".
+- `exo-mesh prep <meeting-id>` — one meeting's brief as of its start: every attendee's standing, last touchpoints, what awaits your reply, promises you made, and one suggested action.
 
 ## Organizing (reversible, local tags synced to Gmail labels)
 - `exo-mail tag <msg-id> +exo/needs-reply -unread` — the `exo/*` namespace plus the
@@ -541,26 +542,24 @@ def _acct_for(emails):
     accs=CFG.accounts()
     return accs[-1] if accs else "personal"
 def _promises(acct, to_email):
-    """Extract commitments you made to this person from your recent sent mail."""
+    """Extract commitments you made to this person from your recent sent mail. The sentence
+    rule is mesh_person.promise_in -- the one rule this and the prep brief both apply (design.md
+    D7); only the window (this account's mail, 200 days back from now) is this command's own."""
     from email.parser import BytesParser
     from email import policy as _pol
+    import mesh_person as _mp
     me = CFG.email_for(acct)
     _,so,_=nm("search","--output=files","--sort=newest-first","from:%s and to:%s and date:200d.."%(me,to_email))
     files=so.splitlines()[:20]
-    PROM=re.compile(r"\b(i'?ll |i will |we'?ll |we will |i'?m going to |i'?m gonna |let me send|let me get|let me put|let me pull|i can send you|i can get you|i'?ll send|i'?ll get you|i'?ll have|i'?ll put|i'?ll share|i'?ll follow up|i'?ll circle back|i'?ll get back|i'?ll loop|i promise|we'?ll send|we'?ll get|we'?ll have)",re.I)
     out=[]
     for fp in files:
         try:
             with open(fp,"rb") as fh: msg=BytesParser(policy=_pol.default).parse(fh)
             part=msg.get_body(preferencelist=("plain",)); txt=part.get_content() if part else ""
         except Exception: continue
-        txt=re.sub(r"\n>.*","",txt); txt=re.sub(r"On .*wrote:.*","",txt,flags=re.S)
-        for sent in re.split(r"(?<=[.!?])\s+|\n",txt):
-            sent=" ".join(sent.split())
-            sl=sent.lower()
-            if "?" in sent or sl.startswith(("can you","could you","would you","will you","do you","are you","can we","re:","fwd:","http","when ")): continue
-            if 12<len(sent)<150 and PROM.search(sent):
-                out.append(sent); break
+        sent = _mp.promise_in(txt)
+        if sent:
+            out.append(sent)
         if len(out)>=3: break
     return out
 
@@ -720,27 +719,11 @@ def cmd_intro(a):
     return out_ok(res["data"], res["summary"], a.json)
 
 def _bedrock_slugs():
-    """Person-file slugs and normalized names carrying `bedrock: true`. Empty when the
-    people dir is unreadable -- an unknown is reported as unknown, never as false."""
-    import re as _re
-    d = CFG.people_dir()
-    slugs, names = set(), set()
-    if not d or not os.path.isdir(d):
-        return slugs, names, False
-    for fn_ in os.listdir(d):
-        if not fn_.endswith(".md"):
-            continue
-        try:
-            head = open(os.path.join(d, fn_), encoding="utf-8", errors="ignore").read(2000)
-        except OSError:
-            continue
-        if _re.search(r"^bedrock:\s*true\s*$", head, _re.M):
-            slugs.add(fn_[:-3].lower())
-            m = _re.search(r"^name:\s*(.+?)\s*$", head, _re.M)
-            nm_ = m.group(1) if m else fn_[:-3].replace("-", " ")
-            names.add(" ".join(sorted(_re.findall(r"[a-z0-9]+", nm_.lower()))))
-    names.discard("")
-    return slugs, names, True
+    """Person-file slugs and normalized names carrying `bedrock: true`. Calls the one shared
+    rule, mesh_person.bedrock_index, that this, exo-day's _bedrock and the prep brief all read
+    (design.md D9) -- an unreadable people dir reads as unknown, never as false."""
+    import mesh_person as _mp
+    return _mp.bedrock_index(CFG.people_dir())
 
 
 def cmd_prep(a):
@@ -863,6 +846,7 @@ def cmd_mcp(a):
       {"name":"day","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"The unified day: today's meetings + next-7d, todos, mail headlines, journal status (local, one read).","inputSchema":{"type":"object","properties":{}}},
       {"name":"calendar","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"Search the local calendar replica (all 3 sources). query=title substring, days=upcoming window.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"days":{"type":"integer"},"limit":{"type":"integer"}}}},
       {"name":"since","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"What changed in your relationships since a window: people interacted with (one row each, per-channel counts, class), meetings ahead with attendees resolved, and the computed enrichment diff.","inputSchema":{"type":"object","properties":{"since":{"type":"string"},"horizon":{"type":"string"},"include":{"type":"string"},"min_signal":{"type":"integer"}}}},
+      {"name":"prep","annotations":{"readOnlyHint":True,"openWorldHint":False},"description":"One meeting's brief, as of its start: every attendee other than the owner, with their relationship on every channel, the last touchpoints, what awaits your reply, the promises you made in mail, and one suggested action chosen from structure alone. Carries content_trust untrusted.","inputSchema":{"type":"object","properties":{"meeting":{"type":"string"},"touchpoints":{"type":"integer"}},"required":["meeting"]}},
     ]
     def dispatch(name,args):
         a_=args or {}
@@ -890,6 +874,10 @@ def cmd_mcp(a):
             for k,fl in (("since","--since"),("horizon","--horizon"),("include","--include"),("min_signal","--min-signal")):
                 if a_.get(k) is not None: xa+=[fl,str(a_[k])]
             return run_bin("exo-mesh-since",xa)
+        if name=="prep":
+            xa=[a_["meeting"]]
+            if a_.get("touchpoints") is not None: xa+=["--touchpoints",str(a_["touchpoints"])]
+            return run_bin("exo-mesh-prep",xa)
         if name=="calendar":
             import sqlite3, time
             dbp=CFG.store_path("calendar.db")

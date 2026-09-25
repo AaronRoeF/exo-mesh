@@ -59,6 +59,7 @@ __all__ = [
     "query_tier", "load_identities", "resolve_person",
     "mesh_path", "snapshot_path", "mail_path", "Zone", "parse_duration", "parse_day",
     "resolve_window", "in_window", "load_timeline", "fetch_mail_details", "iso_day", "utc_day",
+    "bedrock_index", "promise_in", "promises_to", "ro_connect",
 ]
 
 EXIT = {"OK": 0, "USAGE": 1, "NOTFOUND": 2, "AMBIGUOUS": 8}
@@ -277,22 +278,26 @@ def mail_path():
 
 
 def load_identities(path=None):
-    """Every identity as {identity_id, name, emails, phones}. Raises NOTFOUND naming the path
-    when the mesh or its identity table is absent."""
+    """Every identity as {identity_id, name, emails, phones, person_file}. Raises NOTFOUND
+    naming the path when the mesh or its identity table is absent. person_file is read through
+    CFG.col_of, so a store from before that column existed reads it as "" (design.md D9)."""
     path = path or mesh_path()
     if not os.path.exists(path):
         raise MeshError("NOTFOUND", "no mesh at %s" % path, "run exo-mesh-resolve", path=path)
     con = ro_connect(path)
     try:
-        rows = con.execute("SELECT id, name, emails, phones FROM identity ORDER BY id").fetchall()
+        pf_col = CFG.col_of(con, "identity", "person_file")
+        rows = con.execute("SELECT id, name, emails, phones, %s FROM identity ORDER BY id"
+                           % (pf_col if pf_col else "NULL")).fetchall()
     except sqlite3.DatabaseError:
         raise MeshError("NOTFOUND", "no identity table in %s" % path, "run exo-mesh-resolve", path=path)
     finally:
         con.close()
     return [{"identity_id": i, "name": n or "",
              "emails": sorted(set(e.lower() for e in (em or "").split() if "@" in e)),
-             "phones": sorted(set(p for p in (ph or "").split() if phone_key(p)))}
-            for i, n, em, ph in rows]
+             "phones": sorted(set(p for p in (ph or "").split() if phone_key(p))),
+             "person_file": pf or ""}
+            for i, n, em, ph, pf in rows]
 
 
 def resolve_person(query, identities):
@@ -325,6 +330,44 @@ def resolve_person(query, identities):
     raise MeshError("NOTFOUND", "no identity matches %r by phone, email or full name" % q,
                     "pass a full name, an exact email or a phone number; "
                     "exo-mail contact search <text> lists near matches")
+
+
+# ----------------------------------------------------------------------------- bedrock
+_BEDROCK_TRUE = re.compile(r"^bedrock:\s*true\s*$", re.M)
+_BEDROCK_NAME = re.compile(r"^name:\s*(.+?)\s*$", re.M)
+_BEDROCK_WORDS = re.compile(r"[a-z0-9]+")
+BEDROCK_HEAD_CHARS = 2000
+
+
+def bedrock_index(people_dir):
+    """(slugs, normalized names, readable) for person files carrying `bedrock: true` in their
+    first 2000 characters -- a body is never read. readable is False, with both sets empty, when
+    the directory does not exist or cannot be listed (a mode-000 directory passes os.path.isdir
+    but raises on os.listdir, so the OSError is caught here rather than left to the caller). This
+    is the one rule exo-day's `_bedrock` and exo-mail's `_bedrock_slugs` each held a copy of
+    before this change (design.md D9); an unreadable directory now reads as unknown on every
+    surface instead of raising."""
+    slugs, names = set(), set()
+    if not people_dir or not os.path.isdir(people_dir):
+        return slugs, names, False
+    try:
+        filenames = os.listdir(people_dir)
+    except OSError:
+        return slugs, names, False
+    for fn in filenames:
+        if not fn.endswith(".md"):
+            continue
+        try:
+            head = open(os.path.join(people_dir, fn), encoding="utf-8", errors="ignore").read(BEDROCK_HEAD_CHARS)
+        except OSError:
+            continue
+        if _BEDROCK_TRUE.search(head):
+            slugs.add(fn[:-3].lower())
+            m = _BEDROCK_NAME.search(head)
+            raw = m.group(1) if m else fn[:-3].replace("-", " ")
+            names.add(" ".join(sorted(_BEDROCK_WORDS.findall(raw.lower()))))
+    names.discard("")
+    return slugs, names, True
 
 
 # ----------------------------------------------------------------------------- time
@@ -538,13 +581,93 @@ def _body_text(parts):
     return plain, htm
 
 
-def snippet_of(parts):
+def _plain_body(parts):
+    """The plain-text content of a body tree: text/plain if the message carries one, else its
+    text/html with tags stripped. Never quote-stripped or truncated -- callers that want that
+    call strip_quoted or snippet_of themselves."""
     plain, htm = _body_text(parts)
     if plain is None and htm is not None:
         htm = re.sub(r"(?is)<(style|script)\b.*?</\1\s*>", " ", htm)
         htm = re.sub(r"(?i)<br\s*/?>|</p\s*>|</div\s*>", "\n", htm)
         plain = html.unescape(re.sub(r"<[^>]+>", " ", htm))
-    return " ".join(strip_quoted(plain or "").split())[:SNIPPET_CHARS]
+    return plain or ""
+
+
+def snippet_of(parts):
+    return " ".join(strip_quoted(_plain_body(parts)).split())[:SNIPPET_CHARS]
+
+
+# ----------------------------------------------------------------------------- promises
+# The sentence rule exo-mail's `_promises` applies today, moved here unchanged so exo-mail and
+# the prep brief cannot disagree about what counts as a promise (design.md D7).
+_PROMISE_QUOTE_LINE = re.compile(r"\n>.*")
+_PROMISE_WROTE_TAIL = re.compile(r"On .*wrote:.*", re.S)
+_PROMISE_RX = re.compile(
+    r"\b(i'?ll |i will |we'?ll |we will |i'?m going to |i'?m gonna |let me send|let me get|"
+    r"let me put|let me pull|i can send you|i can get you|i'?ll send|i'?ll get you|i'?ll have|"
+    r"i'?ll put|i'?ll share|i'?ll follow up|i'?ll circle back|i'?ll get back|i'?ll loop|"
+    r"i promise|we'?ll send|we'?ll get|we'?ll have)", re.I)
+_PROMISE_SKIP = ("can you", "could you", "would you", "will you", "do you", "are you", "can we",
+                 "re:", "fwd:", "http", "when ")
+
+
+def promise_in(text):
+    """The first sentence of one message that promises something, or None: quoted lines and the
+    trailing "On ... wrote:" header removed, a sentence of 12 to 150 characters that is not a
+    question or a request and matches the first-person future pattern. This is the whole rule;
+    it is never told who the message is to or from, so it cannot be steered by which channel or
+    direction called it."""
+    txt = _PROMISE_QUOTE_LINE.sub("", text or "")
+    txt = _PROMISE_WROTE_TAIL.sub("", txt)
+    for sent in re.split(r"(?<=[.!?])\s+|\n", txt):
+        sent = " ".join(sent.split())
+        sl = sent.lower()
+        if "?" in sent or sl.startswith(_PROMISE_SKIP):
+            continue
+        if 12 < len(sent) < 150 and _PROMISE_RX.search(sent):
+            return sent
+    return None
+
+
+def promises_to(emails, selves, lo, hi):
+    """[{text, date}], newest message first: the first promise_in() of each of the owner's sent
+    messages to any of `emails`, sent between epoch seconds `lo` and `hi` inclusive, over the 20
+    newest such messages, at most three kept. `selves` are the owner's own addresses -- the
+    messages read are FROM one of them TO one of `emails`. Read-only: one notmuch `show`."""
+    tos = [e for e in (emails or []) if e]
+    frm = [s for s in (selves or []) if s]
+    if not tos or not frm:
+        return []
+    fq = " or ".join("from:%s" % _nm_quote(s) for s in frm)
+    tq = " or ".join("to:%s" % _nm_quote(t) for t in tos)
+    q = "(%s) and (%s)" % (fq, tq)
+    if lo is not None and hi is not None:
+        q += " and date:@%d..@%d" % (int(lo), int(hi))
+    ok, out = _nm("show", "--format=json", "--entire-thread=false", "--", q)
+    if not ok:
+        return []
+    try:
+        tree = json.loads(out or "[]")
+    except ValueError:
+        return []
+    msgs = []
+    _walk_messages(tree, msgs)
+    dated = []
+    for m in msgs:
+        if not m.get("match", True) or m.get("excluded"):
+            continue
+        t = int(m.get("timestamp") or 0)
+        if t > 0:
+            dated.append((t, m))
+    dated.sort(key=lambda x: -x[0])
+    found = []
+    for t, m in dated[:20]:
+        sent = promise_in(_plain_body(m.get("body")))
+        if sent:
+            found.append({"text": sent, "date": t})
+        if len(found) >= 3:
+            break
+    return found
 
 
 def fetch_mail_details(items):

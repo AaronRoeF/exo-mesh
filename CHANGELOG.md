@@ -4,6 +4,10 @@ Releases of exo-mesh. Each entry names the source commit it was exported from.
 
 ---
 
+## [2026-09-25] — v0.5.0 — Prep: a brief for one meeting (exo-mesh prep <meeting-id>) — who is coming, standing, recent touchpoints, open loops, promises and one suggested action, full detail for up to 15 attendees, served read-only through the mesh door; exo-day no longer crashes when the people folder is unreadable.
+- Source commit: 01d711d
+
+
 ## [2026-09-25] — v0.4.1 — Readers wait up to 30 s for the sync's writes instead of failing with 'database is locked' (exo-cal and the mesh resolver)
 - Source commit: 1cb1275
 

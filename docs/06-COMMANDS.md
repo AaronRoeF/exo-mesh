@@ -111,6 +111,20 @@ exo-mesh relationship "Jordan Rivera"
 exo-mesh relationship "Jordan Rivera" --since 52w --gap 12 --tz America/New_York
 ```
 
+### You are about to walk into a meeting and want the whole room, not one person — `exo-mesh prep`
+One calendar meeting, by id, as of the moment it starts: every attendee other than you,
+their standing on every channel, the last few things that passed between you (mail, texts,
+shared meetings — this is where meetings enter the timeline), whether one of them is owed
+a reply, what you told them you would do, and one suggested action per person — reply,
+introduce, reconnect or follow up — chosen from who wrote when, never from message words.
+Nothing after the meeting's start counts, so a past meeting's brief reads the same
+tomorrow. Find a meeting's id with `exo-mesh since --include meetings`.
+
+```bash
+exo-mesh prep g:work:abc123
+exo-mesh prep g:work:abc123 --touchpoints 5
+```
+
 ### You want to find out you are losing someone while you can still do something — `exo-mail contact drift`
 Two-way relationships gone quiet across *every* channel, not the email-shaped shadow of
 it. No false alarm about the person you saw on Tuesday, and no silence about the one you

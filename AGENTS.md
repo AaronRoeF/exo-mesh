@@ -34,7 +34,7 @@ this tool** — a confident answer from a stale replica is the failure mode here
 exo-mail mcp        # Model Context Protocol server, stdio transport
 ```
 
-Twelve tools. Ten are read-only; two write, and neither can send mail.
+Thirteen tools. Eleven are read-only; two write, and neither can send mail.
 
 | Tool | Required | Optional | Writes? |
 |---|---|---|---|
@@ -48,6 +48,7 @@ Twelve tools. Ten are read-only; two write, and neither can send mail.
 | `calendar` | — | `query`, `days`, `limit` | no |
 | `day` | — | — | no |
 | `since` | — | `since`, `horizon`, `include`, `min_signal` | no |
+| `prep` | `meeting` | `touchpoints` | no |
 | `tag` | `id`, `ops` | — | **local tags only** |
 | `reply_draft` | `id`, `body` | — | **a Gmail draft; never sends** |
 
@@ -110,7 +111,7 @@ identity; ask rather than guessing which one they meant.
 
 **Read-only — safe to call freely:**
 `search` `conversation` `relationship` `semantic` `box` `count` `thread` `contact`
-`bedrock` `brief` `doctor` `storage` `skill` `calendar` `day` `since`
+`bedrock` `brief` `doctor` `storage` `skill` `calendar` `day` `since` `prep`
 
 **Writes, and what exactly:**
 

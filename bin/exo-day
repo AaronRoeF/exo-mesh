@@ -9,6 +9,7 @@ through the relationship mesh (mesh.db). Read-only; composes, never writes.
 import os, sys, json, re, sqlite3, glob, subprocess, time, datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import exomail_config as CFG
+import mesh_person as _MP
 
 CAL = CFG.store_path("calendar.db")
 EXO_MAIL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "exo-mail")
@@ -61,24 +62,11 @@ def _mesh_index():
     return idx
 
 def _bedrock():
-    """(slugs, normalized names, readable) for people files carrying `bedrock: true`.
-    Twin of exo-mail's _bedrock_slugs — the two collapse when the prep surface is next
-    opened. An unreadable directory returns readable=False so an unknown is reported as
-    unknown, never as false."""
-    d = CFG.people_dir()
-    slugs, names = set(), set()
-    if not d or not os.path.isdir(d): return slugs, names, False
-    for fn in os.listdir(d):
-        if not fn.endswith(".md"): continue
-        try: head = open(os.path.join(d, fn), encoding="utf-8", errors="ignore").read(2000)
-        except OSError: continue
-        if re.search(r"^bedrock:\s*true\s*$", head, re.M):
-            slugs.add(fn[:-3].lower())
-            m = re.search(r"^name:\s*(.+?)\s*$", head, re.M)
-            names.add(" ".join(sorted(re.findall(r"[a-z0-9]+",
-                      (m.group(1) if m else fn[:-3].replace("-", " ")).lower()))))
-    names.discard("")
-    return slugs, names, True
+    """(slugs, normalized names, readable) for people files carrying `bedrock: true`. Calls the
+    one shared rule, mesh_person.bedrock_index, that this and exo-mail's _bedrock_slugs and the
+    prep brief all read (design.md D9) -- an unreadable directory reads as unknown, never as
+    false, and never raises."""
+    return _MP.bedrock_index(CFG.people_dir())
 
 def _relationship(addr, idx, bed, now):
     """One attendee, as a line of standing: who they are, how long since any channel

@@ -5,10 +5,10 @@ contacts, calendar, and todos. Bare `exo-mesh` shows your day; `exo-mesh caps`
 lists what you can do. A thin launcher over the underlying tools — it renames
 nothing, it's just the memorable entry point.
 
-Known subcommands: since, conversation, relationship, caps. Anything else that
-isn't an option (doesn't start with `-`) is a usage error — it used to fall
-through to `exo-day` in silence, which hid typos as a day brief instead of
-naming them.
+Known subcommands: since, conversation, relationship, prep, caps. Anything else
+that isn't an option (doesn't start with `-`) is a usage error — it used to
+fall through to `exo-day` in silence, which hid typos as a day brief instead
+of naming them.
 """
 import sys, os, subprocess
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -17,7 +17,7 @@ import exomail_config as CFG
 BIN = os.path.dirname(os.path.abspath(__file__))
 a = sys.argv[1:]
 
-SUBCOMMANDS = ("since", "conversation", "relationship", "caps")
+SUBCOMMANDS = ("since", "conversation", "relationship", "prep", "caps")
 
 # `since` is the mesh's own subcommand — the deterministic window every enrichment pass
 # was re-deriving by hand. Dispatched, not reimplemented: the launcher stays a launcher.
@@ -33,12 +33,18 @@ if a and a[0] == "conversation":
 if a and a[0] == "relationship":
     sys.exit(subprocess.run([os.path.join(BIN, "exo-mesh-relationship"), *a[1:]]).returncode)
 
+# `prep` is the meeting brief: one event, every attendee's relationship on every channel, as of
+# the meeting's start. Dispatched exactly like `since` — the launcher stays a launcher.
+if a and a[0] == "prep":
+    sys.exit(subprocess.run([os.path.join(BIN, "exo-mesh-prep"), *a[1:]]).returncode)
+
 if a and a[0] in ("caps", "capabilities", "help", "-h", "--help"):
     print("exo-mesh — one mesh over mail · contacts · calendar · todos\n")
     print("  exo-mesh                     your whole day, one local read (= exo-day)")
     print("  exo-mesh since --since 7d    what changed in your relationships in a window")
     print("  exo-mesh conversation <person>   one person's mail + texts, one timeline")
     print("  exo-mesh relationship <person>   one relationship's dynamics: streaks, gaps, initiation")
+    print("  exo-mesh prep <meeting-id>    one meeting's brief: who's coming, standing, one action")
     print("  exo-mail brief               the reply queue + drifting relationships")
     print("  exo-mail box imbox           real correspondence, newsletters filtered")
     print("  exo-mail contact show <name> one whole person across all addresses")
