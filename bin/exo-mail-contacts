@@ -25,7 +25,7 @@ def people_map():
         fm=t.split("---",2)[1] if t.startswith("---") and t.count("---")>=2 else ""
         emails=set()
         for line in fm.splitlines():
-            if re.match(r'\s*(email|emails|alias|aliases|primary_email)\s*:',line,re.I):
+            if re.match(r'\s*(email|emails|alias|aliases|primary_email|personal_email|email_personal)\s*:',line,re.I):
                 emails.update(re.findall(r'[\w.+-]+@[\w.-]+\.\w+',line))
         for e in emails: m[e.lower()]=name
     return m

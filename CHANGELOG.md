@@ -4,6 +4,10 @@ Releases of exo-mesh. Each entry names the source commit it was exported from.
 
 ---
 
+## [2026-10-06] — v0.5.1 — Contacts: a people file's personal_email / email_personal keys now count when merging one person across address books.
+- Source commit: 8d9b15b
+
+
 ## [2026-09-25] — v0.5.0 — Prep: a brief for one meeting (exo-mesh prep <meeting-id>) — who is coming, standing, recent touchpoints, open loops, promises and one suggested action, full detail for up to 15 attendees, served read-only through the mesh door; exo-day no longer crashes when the people folder is unreadable.
 - Source commit: 01d711d
 
